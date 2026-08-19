@@ -9299,6 +9299,7 @@ export class AgentSession {
 			model: this.agent.state.model,
 			thinkingLevel: this.thinkingLevel,
 			tools: this.agent.state.tools,
+			promptStability: this.agent.stabilityMonitor.last(),
 			inlineToolDescriptors: this.#pruneToolDescriptions,
 		});
 	}

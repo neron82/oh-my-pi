@@ -10,6 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model, Usage } from "@oh-my-pi/pi-ai";
+import type { PromptStabilityReport } from "@oh-my-pi/pi-agent-core";
 import { formatSessionDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -226,5 +227,55 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		expect(out).toContain("<thinking>\nfirst\n</thinking>");
 		expect(out).toContain("<thinking>\nsecond\n</thinking>");
 		expect(out).not.toContain("<thinking>\n<thinking>");
+	});
+});
+
+describe("formatSessionDumpText prompt stability", () => {
+	it("renders the latest stability report after the configuration section", () => {
+		const report = {
+			requestIndex: 4,
+			modelId: "gpt-5",
+			providerId: "openai",
+			appendOnly: true,
+			totalBytes: 40_000,
+			systemBytes: 10_000,
+			toolsBytes: 5_000,
+			messagesBytes: 25_000,
+			stablePrefixBytes: 38_000,
+			estimatedCacheHitRatio: 0.95,
+			actualCacheHitRatio: 0.93,
+			cacheReadTokens: 9_300,
+			cacheWriteTokens: 200,
+			firstDivergence: "appended" as const,
+			systemChanged: false,
+			toolsChanged: false,
+			toolNamesAdded: [],
+			toolNamesRemoved: [],
+			messageCount: 12,
+			messagesShrank: false,
+			modelChanged: false,
+			prefixRebuilt: false,
+			cause: ["appended"],
+			events: [],
+		} satisfies PromptStabilityReport;
+
+		const out = formatSessionDumpText({
+			messages: [],
+			systemPrompt: ["system"],
+			model: HARMONY_MODEL,
+			promptStability: report,
+		});
+
+		expect(out).toContain("## Prompt Stability (last request)");
+		expect(out).toContain("Request #4 · model gpt-5 · append-only");
+		expect(out).toContain("Stable prefix: 38000 bytes (95% estimated reuse)");
+		expect(out).toContain("First divergence: appended · cause: appended");
+		expect(out).toContain("Provider-reported cache: 9300 tokens read, 200 written (93% hit)");
+	});
+
+	it("omits the stability section when no request was recorded", () => {
+		const out = formatSessionDumpText({ messages: [], systemPrompt: ["system"], model: HARMONY_MODEL });
+
+		expect(out).not.toContain("## Prompt Stability");
 	});
 });

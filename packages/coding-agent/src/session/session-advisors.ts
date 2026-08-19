@@ -96,6 +96,7 @@ import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
+import { buildKvAlignedSummaryBase } from "./session-maintenance";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
@@ -1428,6 +1429,13 @@ export class SessionAdvisors {
 		// compaction path so the advisor model's maintenance call also emits spans.
 		const telemetry = resolveTelemetry(agent.telemetry, advisorProviderSessionId);
 
+		// KV-aligned summarization base for the advisor's own live model: the
+		// advisor agent runs the same request pipeline (and records the same
+		// stability reports) as the primary session, so its overflow
+		// summarization can replay the live prefix instead of cold-starting a
+		// text-serialized one (prompt-cache stability).
+		const kvAlignedBase = await buildKvAlignedSummaryBase(agent, advisorModel, preparation.messagesToSummarize);
+
 		const codexCompaction = this.#host.createCodexCompactionContext({
 			trigger: "auto",
 			reason: "context_limit",
@@ -1463,6 +1471,10 @@ export class SessionAdvisors {
 					signal,
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
+						kvAlignedBaseContext:
+							kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model)
+								? kvAlignedBase.base
+								: undefined,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,
@@ -1510,6 +1522,7 @@ export class SessionAdvisors {
 		} satisfies AdvisorCompactionSummaryMessage;
 
 		agent.replaceMessages([summaryMessage, ...preparation.recentMessages]);
+		agent.stabilityMonitor.noteEvent("compaction");
 		return false;
 	}
 	/**
@@ -1906,6 +1919,7 @@ export class SessionAdvisors {
 						model: a.agent.state.model,
 						thinkingLevel: a.agent.state.thinkingLevel,
 						tools: a.agent.state.tools,
+						promptStability: a.agent.stabilityMonitor.last(),
 					});
 		if (this.#advisors.length === 1) return dump(this.#advisors[0]);
 		return this.#advisors

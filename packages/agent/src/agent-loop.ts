@@ -52,6 +52,7 @@ import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
+	applyPromptStabilityAttributes,
 	failChatSpan,
 	finishChatSpan,
 	finishExecuteToolSpan,
@@ -1511,6 +1512,106 @@ interface PreparedProviderCall {
 	ownedDialect: Dialect | undefined;
 }
 
+/**
+ * Pipeline inputs shared by the live request preparation
+ * (`prepareProviderCall`) and the KV-aligned compaction replay
+ * (`buildProviderContext`).
+ */
+export interface ProviderContextBuild {
+	/** Session-level message transform (extension context, steering wrap). */
+	transformContext?: AgentLoopConfig["transformContext"];
+	convertToLlm: AgentLoopConfig["convertToLlm"];
+	/** Final provider-level transform (obfuscation, image normalization, reminders). */
+	transformProviderContext?: AgentLoopConfig["transformProviderContext"];
+	intentTracing?: boolean;
+	pruneToolDescriptions?: boolean;
+	dialect?: Dialect;
+}
+
+/** Base (pre-transform) provider context for the plain branch: system prompt +
+ * messages + normalized tools. Shared by the live loop and the replay so the
+ * two can never drift in tool encoding. */
+function buildBaseProviderContext(
+	options: { intentTracing?: boolean; pruneToolDescriptions?: boolean },
+	systemPrompt: string[],
+	tools: AgentContext["tools"],
+	messages: Context["messages"],
+): Context {
+	return {
+		systemPrompt,
+		messages,
+		tools: normalizeTools(tools, {
+			injectIntent: !!options.intentTracing,
+			pruneDescriptions: options.pruneToolDescriptions,
+		}),
+	};
+}
+
+/** Shared tail in live-request order: provider-level transform, then
+ * owned-dialect in-band encoding. Shared by the live loop and the replay. */
+async function finalizeProviderContext(
+	llmContext: Context,
+	model: Model,
+	build: Pick<ProviderContextBuild, "dialect" | "transformProviderContext">,
+): Promise<{ context: Context; promptToolWireTools: Context["tools"] }> {
+	let context = llmContext;
+	if (build.transformProviderContext) {
+		context = await build.transformProviderContext(context, model);
+	}
+	let promptToolWireTools: Context["tools"];
+	const ownedDialect: Dialect | undefined = build.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+	if (ownedDialect && context.tools && context.tools.length > 0) {
+		promptToolWireTools = context.tools;
+		context = {
+			...context,
+			systemPrompt: [...(context.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedDialect)],
+			messages: encodeInbandToolHistory(context.messages, ownedDialect, promptToolWireTools),
+			tools: undefined,
+		};
+	}
+	return { context, promptToolWireTools };
+}
+
+/**
+ * Build the exact provider-bound `Context` the agent loop would send for
+ * `messages` under the given system prompt + tools, running the same pipeline
+ * in the same order as the live request: transformContext → convertToLlm →
+ * normalizeMessagesForProvider → base context (normalizeTools) →
+ * transformProviderContext → owned-dialect in-band encoding.
+ *
+ * KV-aligned compaction uses this to replay the shadowed region through the
+ * live pipeline so the summarization request stays byte-aligned with the last
+ * live request (prompt-cache stability). Uses the PLAIN branch only: in
+ * append-only mode the manager's log holds exactly these normalized messages
+ * and the stable prefix holds exactly these system prompt + tools (same
+ * normalizeTools options), so the result is byte-identical to the live build
+ * without touching the manager's sync state.
+ */
+export async function buildProviderContext(
+	build: ProviderContextBuild,
+	systemPrompt: string[],
+	tools: AgentTool[],
+	messages: AgentMessage[],
+	model: Model,
+	signal?: AbortSignal,
+): Promise<Context> {
+	let transformed = messages;
+	if (build.transformContext) {
+		transformed = await build.transformContext(messages, signal);
+	}
+	const llmMessages = await build.convertToLlm(transformed);
+	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
+	const ownedDialect: Dialect | undefined = build.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+	const pruneToolDescriptions = !!build.pruneToolDescriptions && !ownedDialect;
+	const base = buildBaseProviderContext(
+		{ intentTracing: build.intentTracing, pruneToolDescriptions },
+		systemPrompt,
+		tools,
+		normalizedMessages,
+	);
+	return (await finalizeProviderContext(base, model, build)).context;
+}
+
 async function prepareProviderCall(
 	context: AgentContext,
 	config: AgentLoopConfig,
@@ -1534,30 +1635,15 @@ async function prepareProviderCall(
 			pruneToolDescriptions,
 		});
 	} else {
-		llmContext = {
-			systemPrompt: context.systemPrompt,
-			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, {
-				injectIntent: !!config.intentTracing,
-				pruneDescriptions: pruneToolDescriptions,
-			}),
-		};
+		llmContext = buildBaseProviderContext(
+			{ intentTracing: config.intentTracing, pruneToolDescriptions },
+			context.systemPrompt,
+			context.tools,
+			normalizedMessages,
+		);
 	}
-	if (config.transformProviderContext) {
-		llmContext = await config.transformProviderContext(llmContext, model);
-	}
-
-	let promptToolWireTools: Context["tools"];
-	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
-		promptToolWireTools = llmContext.tools;
-		llmContext = {
-			...llmContext,
-			systemPrompt: [...(llmContext.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedDialect)],
-			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolWireTools),
-			tools: undefined,
-		};
-	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	const finalized = await finalizeProviderContext(llmContext, model, config);
+	return { model, context: finalized.context, promptToolWireTools: finalized.promptToolWireTools, ownedDialect };
 }
 
 /**
@@ -1580,6 +1666,15 @@ async function streamAssistantResponse(
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
+
+	// Prompt-cache observability: record the FINAL provider-bound context (after
+	// append-only build, provider transforms, and owned-dialect in-band encoding)
+	// so the stable prefix, first divergence point, and invalidation cause are
+	// measurable per request (prompt-stability.ts). Pure observation — it never
+	// influences the request itself.
+	const stabilityReport = config.stabilityMonitor
+		? config.stabilityMonitor.recordRequest(llmContext, model, { appendOnly: !!config.appendOnlyContext })
+		: undefined;
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -1647,6 +1742,7 @@ async function streamAssistantResponse(
 			messages: llmContext.messages,
 		},
 	});
+	applyPromptStabilityAttributes(chatSpan, stabilityReport);
 
 	// Wrap the user-supplied onResponse so we always observe response headers
 	// for telemetry (`ChatUsageEvent.headers`, gateway auto-detection) without
@@ -1659,6 +1755,10 @@ async function streamAssistantResponse(
 	};
 
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		// Merge provider-reported cache usage into the stability report before the
+		// span closes so the actual cache-hit ratio lands on the same span.
+		config.stabilityMonitor?.recordUsage(message.usage);
+		applyPromptStabilityAttributes(chatSpan, config.stabilityMonitor?.last());
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
 			serviceTier: effectiveServiceTier,

@@ -5,6 +5,9 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	canonicalMessage,
+	canonicalSystemPrompt,
+	canonicalTools,
 	countTokens,
 	resolveTelemetry,
 	type StreamFn,
@@ -46,7 +49,7 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CodexCompactionContext, Context, Message, Model, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -266,6 +269,73 @@ export interface SessionMaintenanceHost {
 		preserveCompaction?: boolean;
 	}): Promise<void>;
 	abortHandoff(): void;
+}
+
+/**
+ * KV-aligned summarization base tied to the model it was built for. The
+ * base may only be used by a compaction candidate that is the SAME model:
+ * message normalization, image handling, and dialect encoding are
+ * model-specific, and only the live model's prefix cache can be hit.
+ */
+export interface KvAlignedSummaryBase {
+	model: Model;
+	base: { systemPrompt: string[]; tools: Tool[]; messages: Message[] };
+}
+
+/**
+ * Build a KV-aligned summarization base for `compact()` for an agent:
+ * replay the agent's live request pipeline over the shadowed region (same
+ * transformContext → convertToLlm → normalization → provider-transform →
+ * dialect-encoding order as the live turn — including secret obfuscation,
+ * image handling, and date/cwd reminders), then validate the result against
+ * the agent's stability monitor's last recorded live request. When
+ * byte-aligned, the recorded wire bytes are adopted verbatim so the
+ * summarization request becomes a strict prefix extension of the last live
+ * request: KV-retaining backends (llama.cpp-style local engines, provider
+ * prefix caches) serve the whole region from cache and only the instruction
+ * + summary output are prefilled. When the replay has diverged from the
+ * recorded request (state moved on since the last turn), the replayed
+ * context is still a correct summarization request and keeps the partial
+ * prefix overlap it deserves. Returns undefined only when no live request
+ * has been recorded — compaction then uses the text-serialized fallback,
+ * which is fully correct for any provider.
+ *
+ * Shared by the primary session maintenance path and the advisor
+ * overflow-compaction path (each with its own agent + monitor).
+ */
+export async function buildKvAlignedSummaryBase(
+	agent: Agent,
+	liveModel: Model | undefined,
+	region: AgentMessage[],
+): Promise<KvAlignedSummaryBase | undefined> {
+	if (region.length === 0 || !liveModel) return undefined;
+	const live = agent.stabilityMonitor.lastLiveContext();
+	if (!live) return undefined;
+	let replayed: Context;
+	try {
+		replayed = await agent.buildProviderContextForMessages(region, liveModel);
+	} catch {
+		return undefined;
+	}
+	const replayMessages = replayed.messages ?? [];
+	const liveMessages = live.messages;
+	const aligned =
+		canonicalSystemPrompt(replayed.systemPrompt) === canonicalSystemPrompt(live.systemPrompt) &&
+		canonicalTools(replayed.tools) === canonicalTools(live.tools) &&
+		replayMessages.length <= liveMessages.length &&
+		replayMessages.every((message, i) => canonicalMessage(message) === canonicalMessage(liveMessages[i]));
+	const base = aligned
+		? {
+				systemPrompt: live.systemPrompt,
+				tools: live.tools ?? [],
+				messages: liveMessages.slice(0, replayMessages.length),
+			}
+		: {
+				systemPrompt: replayed.systemPrompt ?? [],
+				tools: replayed.tools ?? [],
+				messages: replayMessages,
+			};
+	return { model: liveModel, base };
 }
 
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
@@ -885,6 +955,9 @@ export class SessionMaintenance {
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
+			// Attribute the next live request's prefix rebuild to this compaction
+			// (prompt-cache stability observability: "why did the cache miss?").
+			this.#host.agent.stabilityMonitor.noteEvent("compaction");
 			this.#host.rebaseAfterCompaction();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
@@ -1549,6 +1622,14 @@ export class SessionMaintenance {
 		);
 	}
 
+	/** KV-aligned summarization base for the session's own live model (see
+	 * buildKvAlignedSummaryBase). */
+	async #buildKvAlignedSummaryBase(
+		preparation: CompactionPreparation,
+	): Promise<KvAlignedSummaryBase | undefined> {
+		return buildKvAlignedSummaryBase(this.#host.agent, this.#host.model(), preparation.messagesToSummarize);
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -1559,6 +1640,10 @@ export class SessionMaintenance {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+		// KV-aligned summarization base, built once for the candidate loop;
+		// only handed to the candidate that IS the live model (normalization
+		// and dialect encoding are model-specific).
+		const kvAlignedBase = await this.#buildKvAlignedSummaryBase(preparation);
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
@@ -1581,6 +1666,8 @@ export class SessionMaintenance {
 					signal,
 					{
 						...options,
+						kvAlignedBaseContext:
+							kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model) ? kvAlignedBase.base : undefined,
 						metadata: this.#host.agent.metadataForProvider(candidate.provider),
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
@@ -2634,6 +2721,7 @@ export class SessionMaintenance {
 				const candidates = this.#getCompactionModelCandidates(availableModels);
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+				const kvAlignedBase = await this.#buildKvAlignedSummaryBase(preparation);
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
@@ -2670,6 +2758,10 @@ export class SessionMaintenance {
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
+									kvAlignedBaseContext:
+										kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model)
+											? kvAlignedBase.base
+											: undefined,
 									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",

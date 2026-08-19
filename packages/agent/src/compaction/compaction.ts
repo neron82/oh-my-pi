@@ -819,6 +819,43 @@ export interface SummaryOptions {
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
 	tools?: Tool[];
+	/**
+	 * KV-aligned summarization base: the session's LIVE system prompt + tools
+	 * (exactly what was last on the wire, by reference) plus the shadowed
+	 * region LLM-converted through the session's own request pipeline
+	 * (transformContext → convertToLlm → provider normalization →
+	 * date/cwd reminder), byte-equivalent to the head of the last live
+	 * request. When set (and no `remoteEndpoint`), `compact()` appends the
+	 * same summarization instruction the text path would embed and issues the
+	 * result with `toolChoice: "none"`, so the summarization request becomes a
+	 * genuine prefix extension of the last live request: KV-retaining backends
+	 * (llama.cpp-style local engines, provider prefix caches) serve the whole
+	 * shadowed region from cache and only the instruction + summary output are
+	 * prefilled. The host builds it from the stability monitor's last live
+	 * context; correctness never depends on caching — with it absent, the
+	 * text-serialized fallback below runs and compaction is unaffected.
+	 */
+	kvAlignedBaseContext?: {
+		systemPrompt: string[];
+		tools: Tool[];
+		messages: Message[];
+	};
+	/**
+	 * KV-aligned summarization context. A fully-assembled provider Context that
+	 * replays the session's LIVE system prompt + tools verbatim, then the
+	 * shadowed region's messages (LLM-converted, byte-identical to what the
+	 * live request last sent), with the summarization instruction appended as
+	 * the final user message. When set (and no `remoteEndpoint`),
+	 * `generateSummary` issues this context as-is with `toolChoice: "none"`
+	 * instead of the text-serialized `<conversation>` form, so the
+	 * summarization request becomes a genuine prefix extension of the last
+	 * live request: KV-retaining backends (llama.cpp-style local engines,
+	 * provider prefix caches) serve the whole shadowed region from cache and
+	 * only the instruction + summary output are prefilled. The host builds it
+	 * from the stability monitor's last live context. Correctness never depends
+	 * on caching — it is a valid standalone request either way.
+	 */
+	kvAlignedContext?: Context;
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
 	/**
@@ -966,6 +1003,35 @@ function planSummaryWindows(messages: Message[], dialect: Dialect | undefined, b
 	return windows;
 }
 
+/**
+ * Build the summarization instruction — the tail of the summarization prompt
+ * without the `<conversation>` payload. Shared by the text-serialized path
+ * and the KV-aligned path, where the instruction becomes the final user
+ * message appended after the verbatim replay of the shadowed region, so the
+ * summarization request stays a prefix extension of the last live request.
+ */
+export function buildSummarizationInstruction(args: {
+	promptOverride?: string;
+	previousSummary?: string;
+	customInstructions?: string;
+	extraContext?: string[];
+}): string {
+	let basePrompt = args.previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	if (args.promptOverride) {
+		basePrompt = args.promptOverride;
+	}
+	if (args.customInstructions) {
+		basePrompt = `${basePrompt}\n\nAdditional focus: ${args.customInstructions}`;
+	}
+	let instruction = "";
+	if (args.previousSummary) {
+		instruction += `<previous-summary>\n${escapeSummaryBoundaryTags(args.previousSummary)}\n</previous-summary>\n\n`;
+	}
+	instruction += formatAdditionalContext(args.extraContext);
+	instruction += basePrompt;
+	return instruction;
+}
+
 export async function generateSummary(
 	currentMessages: AgentMessage[],
 	model: Model,
@@ -995,6 +1061,14 @@ export async function generateSummary(
 		countTokens(wholeConversation) <= budgetTokens
 			? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
 			: planSummaryWindows(llmMessages, dialect, budgetTokens).map(messages => ({ messages, budgetTokens }));
+	// KV-aligned mode summarizes the host-provided replay as one indivisible
+	// unit — the live prefix cannot be partitioned, so window planning does not
+	// apply; an oversized region fails this compaction attempt instead of
+	// re-summarizing the same replay once per planned window.
+	if (options?.kvAlignedContext && pending.length > 1) {
+		pending.length = 1;
+		pending[0] = { messages: llmMessages, budgetTokens, text: wholeConversation };
+	}
 
 	let carriedSummary = previousSummary;
 	while (pending.length > 0) {
@@ -1013,6 +1087,9 @@ export async function generateSummary(
 				options,
 			);
 		} catch (error) {
+			// The KV-aligned replay is a single unit: re-planning windows over
+			// the same context cannot fix an overflow.
+			if (options?.kvAlignedContext) throw error;
 			// The catalog window can overstate what the provider actually accepts:
 			// `claude-sonnet-4-5` advertises 1M but is beta-gated to 200k on OAuth
 			// credentials (see `anthropic.ts` — the 1M beta is never advertised).
@@ -1054,22 +1131,16 @@ async function summarizeConversationWindow(
 	customInstructions: string | undefined,
 	options: SummaryOptions | undefined,
 ): Promise<string> {
-	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
-	if (options?.promptOverride) {
-		basePrompt = options.promptOverride;
-	}
-	if (customInstructions) {
-		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
-	}
-
-	// Build the prompt with conversation wrapped in tags
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${escapeSummaryBoundaryTags(previousSummary)}\n</previous-summary>\n\n`;
-	}
-	promptText += formatAdditionalContext(options?.extraContext);
-	promptText += basePrompt;
+	// Build the prompt with conversation wrapped in tags. The instruction tail
+	// comes from buildSummarizationInstruction so the text-serialized path and
+	// the KV-aligned path assemble byte-identical instructions.
+	const instruction = buildSummarizationInstruction({
+		promptOverride: options?.promptOverride,
+		previousSummary,
+		customInstructions,
+		extraContext: options?.extraContext,
+	});
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n` + instruction;
 
 	const summarizationMessages = [
 		{
@@ -1095,9 +1166,17 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
+	// KV-aligned mode: the host supplies a context that replays the session's
+	// live system prompt + tools + the verbatim shadowed region, so this
+	// summarization request is a prefix extension of the last live request and
+	// KV-retaining backends serve the region from cache. The text-serialized
+	// context below remains the valid fallback for any provider.
+	const summarizationContext: Context = options?.kvAlignedContext
+		? options.kvAlignedContext
+		: { systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages };
 	const response = await instrumentedCompleteSimple(
 		model,
-		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
+		summarizationContext,
 		{
 			maxTokens,
 			signal,
@@ -1110,6 +1189,9 @@ async function summarizeConversationWindow(
 			promptCacheKey: options?.promptCacheKey,
 			providerSessionState: options?.providerSessionState,
 			codexCompaction: localCodexCompaction(options),
+			// KV-aligned mode carries the session's live tool array; forbid tool
+			// calls so the reply stays plain summary text.
+			...(options?.kvAlignedContext ? { toolChoice: "none" as const } : {}),
 		},
 		{
 			telemetry: options?.telemetry,
@@ -1658,6 +1740,8 @@ export async function compact(
 		preferWebsockets: options?.preferWebsockets,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
+		kvAlignedContext: options?.kvAlignedContext,
+		kvAlignedBaseContext: options?.kvAlignedBaseContext,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
 	};
@@ -1670,6 +1754,38 @@ export async function compact(
 		previousSummary,
 		previousSnapcompactArchiveText,
 	);
+
+	// KV-aligned summarization: fold the base into a full request context by
+	// appending the exact instruction the text path would embed (same prompt
+	// selection, previous summary, custom focus, extra context). The resulting
+	// request is a prefix extension of the last live request, so KV-retaining
+	// backends serve the shadowed region from cache; the text path remains the
+	// fallback whenever the base is absent.
+	if (summaryOptions.kvAlignedBaseContext) {
+		const base = summaryOptions.kvAlignedBaseContext;
+		summaryOptions.kvAlignedContext = {
+			systemPrompt: base.systemPrompt,
+			tools: base.tools,
+			messages: [
+				...base.messages,
+				{
+					role: "user" as const,
+					content: [
+						{
+							type: "text" as const,
+							text: buildSummarizationInstruction({
+								promptOverride: summaryOptions.promptOverride,
+								previousSummary: previousSummaryForCompaction,
+								customInstructions,
+								extraContext: summaryOptions.extraContext,
+							}),
+						},
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+	}
 	const snapcompactArchiveMigrationMessage = previousSnapcompactArchiveText
 		? createSnapcompactArchiveMigrationMessage(previousSnapcompactArchiveText)
 		: undefined;

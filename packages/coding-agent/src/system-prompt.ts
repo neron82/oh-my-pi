@@ -834,7 +834,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - require the `read` tool so the model can actually fetch skill content;
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	// Sort by name (plain code-unit compare, locale-independent): discovery order
+	// is a filesystem-scan artifact and must not leak into the system prompt —
+	// any reorder between rebuilds would silently invalidate the whole cached
+	// prompt prefix (prompt-cache stability).
+	const filteredSkills = visibleSkills.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,

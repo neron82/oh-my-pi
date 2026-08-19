@@ -6,7 +6,7 @@
  * `## Assistant` (with `<thinking>` blocks and `### Tool Call: <name>` + YAML
  * args), `### Tool Result: <name>`, and the execution/summary sections.
  */
-import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, PromptStabilityReport, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -39,6 +39,9 @@ export interface FormatSessionDumpTextOptions {
 	thinkingLevel?: ThinkingLevel | string | null;
 	tools?: readonly SessionDumpToolInfo[];
 	inlineToolDescriptors?: boolean;
+	/** Latest prompt-stability report (per-request stable-prefix accounting), when
+	 * the agent has recorded at least one provider request. */
+	promptStability?: PromptStabilityReport | null;
 }
 
 interface InventoryTool {
@@ -78,6 +81,25 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 	lines.push(`Model: ${model ? `${model.provider}/${model.id}` : "(not selected)"}`);
 	lines.push(`Thinking Level: ${options.thinkingLevel ?? ""}`);
 	lines.push("\n");
+
+	const stability = options.promptStability;
+	if (stability) {
+		const pct = (value: number) => `${Math.round(value * 1000) / 10}%`;
+		lines.push("## Prompt Stability (last request)\n");
+		lines.push(`Request #${stability.requestIndex} · model ${stability.modelId}${stability.appendOnly ? " · append-only" : ""}`);
+		lines.push(`Total prompt: ${stability.totalBytes} bytes (system ${stability.systemBytes}, tools ${stability.toolsBytes}, messages ${stability.messagesBytes})`);
+		lines.push(
+			`Stable prefix: ${stability.stablePrefixBytes} bytes (${pct(stability.estimatedCacheHitRatio)} estimated reuse)${stability.prefixRebuilt ? " · full prefix rebuild" : ""}`,
+		);
+		lines.push(`First divergence: ${stability.firstDivergence} · cause: ${stability.cause.join(", ")}`);
+		lines.push(
+			`System changed: ${stability.systemChanged ? "yes" : "no"} · tools changed: ${stability.toolsChanged ? "yes" : "no"}${stability.toolNamesAdded.length > 0 ? ` (+${stability.toolNamesAdded.join(", ")})` : ""}${stability.toolNamesRemoved.length > 0 ? ` (-${stability.toolNamesRemoved.join(", ")})` : ""} · model changed: ${stability.modelChanged ? "yes" : "no"}`,
+		);
+		if (stability.actualCacheHitRatio !== undefined) {
+			lines.push(`Provider-reported cache: ${stability.cacheReadTokens ?? 0} tokens read, ${stability.cacheWriteTokens ?? 0} written (${pct(stability.actualCacheHitRatio)} hit)`);
+		}
+		lines.push("\n");
+	}
 
 	const hasSystemPromptToolInventory = options.inlineToolDescriptors === true;
 	if (inventoryTools.length > 0 && !hasSystemPromptToolInventory) {

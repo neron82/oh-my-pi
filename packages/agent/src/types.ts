@@ -23,6 +23,7 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { PromptStabilityMonitor } from "./prompt-stability";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
 
@@ -386,6 +387,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * `i` intent fields.
 	 */
 	appendOnlyContext?: AppendOnlyContextManager;
+
+	/**
+	 * Prompt-stability monitor — observes every provider-bound request and
+	 * reports how much of the serialized prompt was already established by
+	 * the previous request (stable prefix, first divergence, invalidation
+	 * cause, estimated/actual cache-hit ratio). Pure observation: it never
+	 * influences request construction, so caching is never required for
+	 * correctness. See `prompt-stability.ts`.
+	 */
+	stabilityMonitor?: PromptStabilityMonitor;
 
 	/**
 	 * Inspect assistant streaming events before they are published to the outer agent event stream.

@@ -5443,9 +5443,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Protocol",
 			label: "Append-Only Context",
 			description:
-				"Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic) hit at maximum rate. Auto enables for known prefix-cache providers.",
+				"Cache system prompt + tool specs and keep an append-only message log so provider prefix/KV caches hit at maximum rate. Auto enables for every configured model; off is the escape hatch.",
 			options: [
-				{ value: "auto", label: "Auto", description: "Enable for known prefix-cache providers (recommended)" },
+				{ value: "auto", label: "Auto", description: "Enable for every configured model (recommended)" },
 				{ value: "on", label: "On", description: "Always enable append-only context" },
 				{ value: "off", label: "Off", description: "Disable append-only context" },
 			],

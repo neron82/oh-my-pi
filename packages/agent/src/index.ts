@@ -4,6 +4,8 @@ export * from "./agent";
 export * from "./agent-loop";
 // Append-only context mode
 export * from "./append-only-context";
+// Prompt-stability monitoring (prefix-cache observability)
+export * from "./prompt-stability";
 // Compaction
 export * from "./compaction";
 // Process-global pause gate

@@ -50,6 +50,7 @@ import {
 	trace,
 } from "@opentelemetry/api";
 import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
+import type { PromptStabilityReport } from "./prompt-stability";
 import type { AgentTool } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
@@ -161,6 +162,19 @@ export const enum PiGenAIAttr {
 	GatewayRoutedTo = "pi.gen_ai.gateway.routed_to",
 	/** Cloudflare AI Gateway response-cache status (`cf-aig-cache-status`), never prompt-cache. */
 	GatewayResponseCacheStatus = "pi.gen_ai.gateway.response_cache.status",
+	// Prompt stability (see prompt-stability.ts): how much of this request's
+	// serialized prompt was already established by the previous request of
+	// the same agent. Distinct from provider prompt-cache token counters
+	// (`gen_ai.usage.cache_*`), which measure what the backend actually
+	// served from cache; these describe the harness-side guarantee.
+	PromptStabilityTotalBytes = "pi.gen_ai.prompt_stability.total_bytes",
+	PromptStabilityStablePrefixBytes = "pi.gen_ai.prompt_stability.stable_prefix_bytes",
+	PromptStabilityFirstDivergence = "pi.gen_ai.prompt_stability.first_divergence",
+	PromptStabilityEstimatedCacheHitRatio = "pi.gen_ai.prompt_stability.estimated_cache_hit_ratio",
+	PromptStabilityActualCacheHitRatio = "pi.gen_ai.prompt_stability.actual_cache_hit_ratio",
+	PromptStabilitySystemChanged = "pi.gen_ai.prompt_stability.system_changed",
+	PromptStabilityToolsChanged = "pi.gen_ai.prompt_stability.tools_changed",
+	PromptStabilityPrefixRebuilt = "pi.gen_ai.prompt_stability.prefix_rebuilt",
 }
 
 /** GenAI operation names — values for {@link GenAIAttr.OperationName}. */
@@ -1225,6 +1239,25 @@ function applyUsageAttributes(span: Span, usage: Usage | undefined): void {
 		const sums = (usage.server.webSearch ?? 0) + (usage.server.webFetch ?? 0);
 		if (sums > 0) span.setAttribute(PiGenAIAttr.UsageServerSideTools, sums);
 	}
+}
+
+/**
+ * Stamp a {@link PromptStabilityReport} onto a chat span. Safe to call twice
+ * per span (request time, then again after provider usage lands) — the
+ * second call adds the provider-measured cache ratio when available.
+ */
+export function applyPromptStabilityAttributes(span: Span | undefined, report: PromptStabilityReport | undefined): void {
+	if (!span || !report) return;
+	span.setAttribute(PiGenAIAttr.PromptStabilityTotalBytes, report.totalBytes);
+	span.setAttribute(PiGenAIAttr.PromptStabilityStablePrefixBytes, report.stablePrefixBytes);
+	span.setAttribute(PiGenAIAttr.PromptStabilityFirstDivergence, report.firstDivergence);
+	span.setAttribute(PiGenAIAttr.PromptStabilityEstimatedCacheHitRatio, report.estimatedCacheHitRatio);
+	if (report.actualCacheHitRatio != null) {
+		span.setAttribute(PiGenAIAttr.PromptStabilityActualCacheHitRatio, report.actualCacheHitRatio);
+	}
+	span.setAttribute(PiGenAIAttr.PromptStabilitySystemChanged, report.systemChanged);
+	span.setAttribute(PiGenAIAttr.PromptStabilityToolsChanged, report.toolsChanged);
+	span.setAttribute(PiGenAIAttr.PromptStabilityPrefixRebuilt, report.prefixRebuilt);
 }
 
 /**

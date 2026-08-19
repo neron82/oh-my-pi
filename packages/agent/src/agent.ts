@@ -30,12 +30,14 @@ import {
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
+	buildProviderContext,
 	createSyntheticToolResultMessage,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import { PromptStabilityMonitor } from "./prompt-stability";
 import { isProviderRefusalMessage } from "./replay-policy";
 import type {
 	AgentBeforeModelCall,
@@ -426,6 +428,8 @@ export class Agent {
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
+	/** Per-agent prompt-stability monitor (always on; pure observation). */
+	#stabilityMonitor = new PromptStabilityMonitor();
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
@@ -731,6 +735,41 @@ export class Agent {
 
 	setAppendOnlyContext(manager?: AppendOnlyContextManager): void {
 		this.#appendOnlyContext = manager;
+	}
+
+	/** Prompt-stability monitor: per-request stable-prefix / invalidation reports. */
+	get stabilityMonitor(): PromptStabilityMonitor {
+		return this.#stabilityMonitor;
+	}
+
+	/**
+	 * Replay this agent's live request pipeline over `messages` and return the
+	 * exact provider-bound Context the loop would send for them (same
+	 * transformContext → convertToLlm → normalization → provider-transform →
+	 * dialect-encoding order as the live turn). KV-aligned compaction uses this
+	 * to convert the shadowed region so the summarization request stays
+	 * byte-aligned with the last live request (prompt-cache stability).
+	 */
+	async buildProviderContextForMessages(
+		messages: AgentMessage[],
+		model: Model,
+		signal?: AbortSignal,
+	): Promise<Context> {
+		return buildProviderContext(
+			{
+				transformContext: this.#transformContext,
+				convertToLlm: this.#convertToLlm,
+				transformProviderContext: this.#transformProviderContext,
+				intentTracing: this.#intentTracing,
+				pruneToolDescriptions: this.#pruneToolDescriptions,
+				dialect: this.#dialect,
+			},
+			this.#state.systemPrompt,
+			this.#toolsForModel(model),
+			messages,
+			model,
+			signal,
+		);
 	}
 
 	#toolsForModel(model: Model): AgentTool[] {
@@ -1119,6 +1158,9 @@ export class Agent {
 		this.#followUpQueue = [];
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
+		// New prefix epoch: the recorded request history belongs to the old
+		// trajectory, so the monitor starts from scratch with the state.
+		this.#stabilityMonitor.reset();
 	}
 
 	/** Send a prompt with an AgentMessage */
@@ -1436,6 +1478,7 @@ export class Agent {
 			dialect: this.#dialect,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
+			stabilityMonitor: this.#stabilityMonitor,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
 			transformAssistantMessage: this.transformAssistantMessage
