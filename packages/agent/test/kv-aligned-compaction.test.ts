@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
-	type CompactionPreparation,
 	buildSummarizationInstruction,
+	type CompactionPreparation,
 	compact,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateSummary,
 	SUMMARIZATION_SYSTEM_PROMPT,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import { Agent } from "../src/agent";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { AssistantMessage, Context, Message, Model, Tool } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Agent } from "../src/agent";
 
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
@@ -112,9 +112,18 @@ describe("KV-aligned compaction", () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		const base = liveBase();
 
-		const summary = await generateSummary(liveMessages, getModel(), 10_000, "test-key", undefined, undefined, undefined, {
-			kvAlignedContext: base,
-		});
+		const summary = await generateSummary(
+			liveMessages,
+			getModel(),
+			10_000,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			{
+				kvAlignedContext: base,
+			},
+		);
 
 		expect(summary).toBe("summary");
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -142,16 +151,9 @@ describe("KV-aligned compaction", () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		const preparation = makePreparation();
 
-		await compact(
-			preparation,
-			getModel(),
-			"test-key",
-			"focus on the tests",
-			undefined,
-			{
-				kvAlignedBaseContext: liveBase(),
-			},
-		);
+		await compact(preparation, getModel(), "test-key", "focus on the tests", undefined, {
+			kvAlignedBaseContext: liveBase(),
+		});
 
 		// Two oneshot calls: history summary + short summary.
 		expect(spy).toHaveBeenCalledTimes(2);
@@ -220,7 +222,7 @@ describe("Agent.buildProviderContextForMessages", () => {
 			},
 			transformProviderContext: async context => {
 				steps.push("transformProviderContext");
-			return { ...context, systemPrompt: [...(context.systemPrompt ?? []), "hook"] };
+				return { ...context, systemPrompt: [...(context.systemPrompt ?? []), "hook"] };
 			},
 		});
 

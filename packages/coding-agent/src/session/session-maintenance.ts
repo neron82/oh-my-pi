@@ -49,7 +49,15 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Context, Message, Model, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	Context,
+	Message,
+	Model,
+	ProviderSessionState,
+	Tool,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -1624,9 +1632,7 @@ export class SessionMaintenance {
 
 	/** KV-aligned summarization base for the session's own live model (see
 	 * buildKvAlignedSummaryBase). */
-	async #buildKvAlignedSummaryBase(
-		preparation: CompactionPreparation,
-	): Promise<KvAlignedSummaryBase | undefined> {
+	async #buildKvAlignedSummaryBase(preparation: CompactionPreparation): Promise<KvAlignedSummaryBase | undefined> {
 		return buildKvAlignedSummaryBase(this.#host.agent, this.#host.model(), preparation.messagesToSummarize);
 	}
 

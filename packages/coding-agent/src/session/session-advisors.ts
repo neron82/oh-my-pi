@@ -95,8 +95,8 @@ import {
 import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
-import type { SessionManager } from "./session-manager";
 import { buildKvAlignedSummaryBase } from "./session-maintenance";
+import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
@@ -1472,9 +1472,7 @@ export class SessionAdvisors {
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
 						kvAlignedBaseContext:
-							kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model)
-								? kvAlignedBase.base
-								: undefined,
+							kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model) ? kvAlignedBase.base : undefined,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,

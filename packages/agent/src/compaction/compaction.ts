@@ -1140,7 +1140,7 @@ async function summarizeConversationWindow(
 		customInstructions,
 		extraContext: options?.extraContext,
 	});
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n` + instruction;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instruction}`;
 
 	const summarizationMessages = [
 		{

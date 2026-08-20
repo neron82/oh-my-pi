@@ -217,7 +217,11 @@ export class PromptStabilityMonitor {
 	 * that is about to be serialized for the provider (after all
 	 * transforms), once per request, in request order.
 	 */
-	recordRequest(context: Context, model: { id: string; provider: string }, meta?: { appendOnly?: boolean }): PromptStabilityReport {
+	recordRequest(
+		context: Context,
+		model: { id: string; provider: string },
+		meta?: { appendOnly?: boolean },
+	): PromptStabilityReport {
 		const systemPrompt = context.systemPrompt;
 		const tools = context.tools;
 		const messages = context.messages ?? [];
@@ -277,7 +281,7 @@ export class PromptStabilityMonitor {
 			firstDivergence = "none";
 		}
 
-		const toolNamesAdded = toolNames.filter(name => !prev || !prev.toolNames.includes(name));
+		const toolNamesAdded = toolNames.filter(name => !prev?.toolNames.includes(name));
 		const toolNamesRemoved = prev ? prev.toolNames.filter(name => !toolNames.includes(name)) : [];
 
 		const cause: string[] = [];
@@ -400,13 +404,15 @@ export class PromptStabilityMonitor {
 	 * recorded wire bytes are adopted verbatim. Returns undefined before the
 	 * first recorded request.
 	 */
-	lastLiveContext(): {
-		systemPrompt: string[];
-		tools: Context["tools"];
-		messages: Message[];
-	} | undefined {
+	lastLiveContext():
+		| {
+				systemPrompt: string[];
+				tools: Context["tools"];
+				messages: Message[];
+		  }
+		| undefined {
 		const last = this.#last;
-		if (!last || !last.systemPrompt || last.systemPrompt.length === 0) return undefined;
+		if (!last?.systemPrompt || last.systemPrompt.length === 0) return undefined;
 		return { systemPrompt: last.systemPrompt, tools: last.toolsRef ?? [], messages: last.messagesRef };
 	}
 
@@ -417,8 +423,4 @@ export class PromptStabilityMonitor {
 		this.#reports = [];
 		this.#pendingEvents = [];
 	}
-}
-
-function round4(value: number): number {
-	return Math.round(value * 10000) / 10000;
 }

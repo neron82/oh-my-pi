@@ -49,8 +49,8 @@ import {
 	type Tracer,
 	trace,
 } from "@opentelemetry/api";
-import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { PromptStabilityReport } from "./prompt-stability";
+import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { AgentTool } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
@@ -1246,7 +1246,10 @@ function applyUsageAttributes(span: Span, usage: Usage | undefined): void {
  * per span (request time, then again after provider usage lands) — the
  * second call adds the provider-measured cache ratio when available.
  */
-export function applyPromptStabilityAttributes(span: Span | undefined, report: PromptStabilityReport | undefined): void {
+export function applyPromptStabilityAttributes(
+	span: Span | undefined,
+	report: PromptStabilityReport | undefined,
+): void {
 	if (!span || !report) return;
 	span.setAttribute(PiGenAIAttr.PromptStabilityTotalBytes, report.totalBytes);
 	span.setAttribute(PiGenAIAttr.PromptStabilityStablePrefixBytes, report.stablePrefixBytes);

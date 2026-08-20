@@ -36,19 +36,14 @@
  */
 import * as fs from "node:fs/promises";
 
-import {
-	type Api,
-	type AssistantMessage,
-	type Context,
-	registerCustomApi,
-} from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type Context, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // ---------------------------------------------------------------------------
@@ -341,17 +336,17 @@ async function runConfiguration(label: string, setting: "off" | "auto", api: str
 						stream.push({ type: "text_start", contentIndex: 0, partial: message });
 						stream.push({ type: "text_delta", contentIndex: 0, delta: block.text, partial: message });
 						stream.push({ type: "text_end", contentIndex: 0, content: block.text, partial: message });
-				} else if (block.type === "toolCall") {
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(block.arguments),
-						partial: message,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: block, partial: message });
+					} else if (block.type === "toolCall") {
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 0,
+							delta: JSON.stringify(block.arguments),
+							partial: message,
+						});
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: block, partial: message });
+					}
 				}
-			}
 				stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
 			});
 			return stream;
@@ -472,9 +467,7 @@ async function runConfiguration(label: string, setting: "off" | "auto", api: str
 				summary: {
 					requests: requests.length,
 					avgReuseRatio:
-						fromSecond.length > 0
-							? fromSecond.reduce((a, r) => a + r.reuseRatio, 0) / fromSecond.length
-							: 0,
+						fromSecond.length > 0 ? fromSecond.reduce((a, r) => a + r.reuseRatio, 0) / fromSecond.length : 0,
 					fullRebuilds: fromSecond.filter(r => r.prefixRebuilt).length,
 					invalidations: fromSecond.filter(r => r.cause.some(c => c !== "appended")).length,
 					causeBreakdown,
@@ -512,7 +505,9 @@ function printReport(legacy: ConfigResult, fresh: ConfigResult): void {
 	);
 	for (const cfg of [legacy, fresh]) {
 		const note =
-			cfg.setting === "off" ? "pre-change default for server-side cache providers" : "current default (auto → append-only ON)";
+			cfg.setting === "off"
+				? "pre-change default for server-side cache providers"
+				: "current default (auto → append-only ON)";
 		console.log(`Configuration: ${cfg.label} — provider.appendOnlyContext=${cfg.setting} (${note})`);
 		console.log(`append-only active: ${cfg.appendOnlyActive ? "yes" : "no"}\n`);
 		console.log("  req  turn  total  stable-prefix  reuse   divergence       cause");

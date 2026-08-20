@@ -58,10 +58,7 @@ describe("PromptStabilityMonitor", () => {
 	test("append-only growth keeps the entire previous request as a stable prefix", () => {
 		const monitor = new PromptStabilityMonitor();
 		const first = monitor.recordRequest(makeContext([userMessage("a")], [tool("t")]), modelA);
-		const second = monitor.recordRequest(
-			makeContext([userMessage("a"), userMessage("b")], [tool("t")]),
-			modelA,
-		);
+		const second = monitor.recordRequest(makeContext([userMessage("a"), userMessage("b")], [tool("t")]), modelA);
 
 		expect(second.firstDivergence).toBe("appended");
 		expect(second.cause).toEqual(["appended"]);
@@ -97,14 +94,8 @@ describe("PromptStabilityMonitor", () => {
 
 	test("rewritten middle message diverges exactly at its index", () => {
 		const monitor = new PromptStabilityMonitor();
-		const first = monitor.recordRequest(
-			makeContext([userMessage("a"), userMessage("b"), userMessage("c")]),
-			modelA,
-		);
-		const second = monitor.recordRequest(
-			makeContext([userMessage("a"), userMessage("B"), userMessage("c")]),
-			modelA,
-		);
+		const first = monitor.recordRequest(makeContext([userMessage("a"), userMessage("b"), userMessage("c")]), modelA);
+		const second = monitor.recordRequest(makeContext([userMessage("a"), userMessage("B"), userMessage("c")]), modelA);
 
 		expect(second.firstDivergence).toBe("message[1]");
 		expect(second.cause).toContain("message[1]-rewritten");
@@ -139,7 +130,10 @@ describe("PromptStabilityMonitor", () => {
 		monitor.recordRequest(makeContext([userMessage("a")]), modelA);
 		monitor.noteEvent("compaction");
 		const withEvent = monitor.recordRequest(makeContext([userMessage("a"), userMessage("b")]), modelA);
-		const without = monitor.recordRequest(makeContext([userMessage("a"), userMessage("b"), userMessage("c")]), modelA);
+		const without = monitor.recordRequest(
+			makeContext([userMessage("a"), userMessage("b"), userMessage("c")]),
+			modelA,
+		);
 
 		expect(withEvent.events).toEqual(["compaction"]);
 		expect(withEvent.cause).toContain("compaction");
