@@ -184,6 +184,15 @@ async function pollUntil(check: () => Promise<boolean>, description: string): Pr
 	throw new Error(`Timed out waiting for ${description}`);
 }
 
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 describe("LspMuxServer", () => {
 	let server: LspMuxServer;
 	let tmpDir: string;
@@ -392,6 +401,30 @@ describe("LspMuxServer", () => {
 			});
 			await second.client.request("test/echo", { barrier: true });
 			expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
+		},
+		10_000,
+	);
+
+	const overflowFixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server-overflow.ts");
+
+	it.skipIf(process.platform === "win32")(
+		"kills a server whose frame buffer overflows",
+		async () => {
+			const pidFile = path.join(tmpDir, "overflow.pid");
+			const client = await MuxTestClient.connect(socketPath);
+			clients.push(client);
+			const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, {
+				...connectParams,
+				args: ["run", overflowFixturePath],
+			});
+			expect(connected.spawned).toBe(true);
+			await pollUntil(
+				async () => (await fs.readFile(pidFile, "utf8").catch(() => "")).trim().length > 0,
+				"pid file",
+			);
+			const pid = Number((await fs.readFile(pidFile, "utf8")).trim());
+			await pollUntil(async () => !isProcessAlive(pid), "overflowing server to be killed");
+			await client.waitForClose();
 		},
 		10_000,
 	);

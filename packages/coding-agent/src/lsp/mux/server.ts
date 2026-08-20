@@ -475,7 +475,8 @@ export class LspMuxServer {
 					}
 				}
 				if (framer.overflowed) {
-					logger.warn("LSP mux server frame buffer overflow; stopping reader", { server: server.key });
+					logger.warn("LSP mux server frame buffer overflow; killing server", { server: server.key });
+					this.#killServer(server);
 					break;
 				}
 			}

@@ -653,6 +653,9 @@ export class DapClient {
 		// in-flight request and event waiter so callers see an immediate error
 		// instead of waiting out their own timeout.
 		this.#failConnection(closeError ?? new Error(`DAP connection closed: ${this.adapter.name} transport ended`));
+		// Overflow tears the framing down while the adapter is still alive —
+		// kill the process/socket instead of leaving it behind with an unread pipe.
+		if (framer.overflowed) void this.dispose();
 	}
 
 	#handleResponse(message: DapResponseMessage): void {
