@@ -633,6 +633,11 @@ export class DapClient {
 						});
 					}
 				}
+				if (framer.overflowed) {
+					logger.error("DAP frame buffer overflow; tearing down connection", { adapter: this.adapter.name });
+					closeError = new Error("DAP frame buffer overflow: pending bytes exceeded cap");
+					break;
+				}
 			}
 		} catch (error) {
 			closeError = new Error(`DAP connection closed: ${toErrorMessage(error)}`);

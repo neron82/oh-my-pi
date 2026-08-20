@@ -421,6 +421,10 @@ async function startMessageReader(client: LspClient): Promise<void> {
 					});
 				}
 			}
+			if (framer.overflowed) {
+				logger.error("LSP frame buffer overflow; tearing down connection", { server: client.name });
+				break;
+			}
 		}
 	} catch (err) {
 		readerFailed = true;

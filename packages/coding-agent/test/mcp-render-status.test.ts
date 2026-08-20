@@ -166,4 +166,47 @@ describe("MCP tool rendering", () => {
 		// inline notice was stripped from the body rather than echoed verbatim.
 		expect(rendered.split("artifact://7").length - 1).toBe(1);
 	}, 15_000);
+	it("strips terminal escape injection from untrusted Markdown-rendered MCP text", () => {
+		// Regression: raw OSC 52 (clipboard write) payloads from a malicious
+		// MCP server must not reach the TTY through the default-on Markdown
+		// render path. Assert on the RAW rendered bytes — stripANSI here would
+		// mask the very sequences under test.
+		const osc52 = "\x1b]52;c;c2V4cA==\x07";
+		const result = {
+			content: [{ type: "text" as const, text: `hello ${osc52} world` }],
+			details: { serverName: "sentry", mcpToolName: "search_events" },
+		};
+
+		const rendered = renderMCPResult(result, { expanded: false, isPartial: false }, activeTheme)
+			.render(160)
+			.join("\n");
+
+		expect(rendered).not.toContain("\x1b]52");
+		expect(rendered).not.toContain("\x07");
+		// Sanitization must preserve the visible text, not drop the body.
+		expect(Bun.stripANSI(rendered)).toContain("hello");
+		expect(Bun.stripANSI(rendered)).toContain("world");
+	}, 15_000);
+
+	it("strips terminal escape injection from MCP JSON keys and values", () => {
+		// Legal JSON can carry control characters as \u escapes (e.g. \u001b)
+		// that survive JSON.parse: the JSON-tree path must sanitize parsed
+		// keys and values, not just the raw wire text.
+		const jsonText = '{"k\\u0007ey":"a\\u001b]52;c;c2V4cA==\\u0007b"}';
+		const result = {
+			content: [{ type: "text" as const, text: jsonText }],
+			details: { serverName: "sentry", mcpToolName: "search_events" },
+		};
+
+		const rendered = renderMCPResult(result, { expanded: false, isPartial: false }, activeTheme)
+			.render(160)
+			.join("\n");
+
+		expect(rendered).not.toContain("\x1b]52");
+		expect(rendered).not.toContain("\x07");
+		// Sanitization strips the whole OSC sequence (escape + payload +
+		// terminator) but preserves the surrounding visible text.
+		expect(Bun.stripANSI(rendered)).toContain("key");
+		expect(Bun.stripANSI(rendered)).toContain('"ab"');
+	}, 15_000);
 });

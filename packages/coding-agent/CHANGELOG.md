@@ -10,6 +10,13 @@
 
 - `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
 
+### Fixed
+
+- Fixed MCP tool results rendering terminal escape injection: a malicious or compromised MCP server could embed OSC sequences (e.g. OSC 52 clipboard writes) or other control characters in a result, which reached the user's TTY through the Markdown, JSON-tree, and raw-text render paths. Result content is now sanitized before any render path — including string keys and values of parsed JSON, where control characters can travel as legal `\u` escapes that survive `JSON.parse`.
+- Fixed `/dump` and copy-session export writing their LLM request sidecars world-readable in `$TMPDIR` (subject to the process umask). The capture holds raw session context (file contents, anything the user pasted), so it is now created owner-only (0600), and sidecars older than 24h are opportunistically pruned on each dump so they do not accumulate.
+- Fixed unbounded memory growth in the `claude trace` debug proxy: the CONNECT head, tunneled HTTP messages (declared `Content-Length` or accumulated chunked bytes), and decompressed request/response bodies are now size-capped. A peer that exceeds a cap has its connection torn down instead of growing the proxy's buffers, and an over-cap compressed body degrades to the raw bounded bytes.
+- Fixed unbounded pending-buffer growth in the shared LSP/DAP stdio framing: a server that lies about `Content-Length` or never terminates a frame could grow the client's message buffer without limit. Pending bytes are now capped; overflow is treated as a protocol error and tears down the connection in the LSP client, DAP adapter, and LSP mux sessions/daemon.
+
 ## [17.3.8] - 2026-08-19
 
 ### Added

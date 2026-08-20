@@ -5,6 +5,7 @@
  * showing args and output in JSON tree format similar to task tool.
  */
 import { type Component, Markdown } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
@@ -105,6 +106,26 @@ function renderMarkdownMCPResult(
 }
 
 /**
+ * Sanitize every string key and value of a parsed JSON document. The raw-text
+ * chokepoint only sees the wire bytes: a legal JSON payload can carry control
+ * characters as `\u001b` escapes that survive `JSON.parse` and would otherwise
+ * reach the TTY through the JSON-tree renderer (which does not sanitize
+ * scalar values or keys).
+ */
+function sanitizeJsonStrings(value: unknown): unknown {
+	if (typeof value === "string") return sanitizeText(value);
+	if (Array.isArray(value)) return value.map(sanitizeJsonStrings);
+	if (value !== null && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			out[sanitizeText(key)] = sanitizeJsonStrings(entry);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
  * Render MCP tool result.
  */
 export function renderMCPResult(
@@ -114,7 +135,11 @@ export function renderMCPResult(
 	args?: Record<string, unknown>,
 ): Component {
 	const { expanded } = options;
-	const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
+	// MCP server content is untrusted: strip ANSI/OSC escapes and control
+	// characters before any render path (Markdown, JSON tree, raw text) so a
+	// malicious server cannot inject terminal sequences (OSC 52 clipboard
+	// writes, cursor/SGR state, …) into the user's TTY.
+	const textContent = sanitizeText(result.content?.find(c => c.type === "text")?.text ?? "");
 	const trimmedOutput = stripOutputNotice(textContent, result.details?.meta).trimEnd();
 	const truncationWarning = result.details?.meta?.truncation
 		? formatStyledTruncationWarning(result.details.meta, theme)
@@ -123,7 +148,7 @@ export function renderMCPResult(
 	let isJsonOutput = false;
 	if (trimmedOutput.startsWith("{") || trimmedOutput.startsWith("[")) {
 		try {
-			parsedOutput = JSON.parse(trimmedOutput);
+			parsedOutput = sanitizeJsonStrings(JSON.parse(trimmedOutput));
 			isJsonOutput = true;
 		} catch {
 			// Non-JSON text beginning with a bracket is still eligible for Markdown.

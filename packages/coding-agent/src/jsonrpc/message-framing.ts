@@ -12,6 +12,14 @@
 const MESSAGE_DECODER = new TextDecoder("utf-8");
 
 /**
+ * Default cap on buffered (unparsed) bytes. A single LSP/DAP message peaks in
+ * the tens of MB (whole-file diagnostics, large source content); 64 MB keeps
+ * the buffer finite against a server that lies about Content-Length or never
+ * terminates a frame.
+ */
+const DEFAULT_MAX_PENDING_BYTES = 64 * 1024 * 1024;
+
+/**
  * Locate the `\r\n\r\n` header terminator across the pending chunk list.
  * Returns the absolute byte index of the first `\r`, or -1 when not present.
  * Equivalent to scanning the contiguous concatenation of the chunks.
@@ -83,19 +91,43 @@ function dropChunkFront(chunks: Buffer[], count: number): void {
 export class MessageFramer {
 	readonly #pendingChunks: Buffer[] = [];
 	#pendingLen = 0;
+	readonly #maxPendingBytes: number;
+	#overflowed = false;
 
 	/** Seed the buffer with any unparsed remainder left by a previous reader. */
-	constructor(seed: Buffer) {
-		if (seed.length > 0) {
-			this.#pendingChunks.push(seed);
-			this.#pendingLen = seed.length;
+	constructor(seed: Buffer, maxPendingBytes = DEFAULT_MAX_PENDING_BYTES) {
+		this.#maxPendingBytes = maxPendingBytes;
+		if (seed.length === 0) return;
+		if (seed.length > maxPendingBytes) {
+			// A persisted remainder over the cap can never complete: start
+			// overflowed rather than inheriting an oversized buffer.
+			this.#overflowed = true;
+			return;
 		}
+		this.#pendingChunks.push(seed);
+		this.#pendingLen = seed.length;
+	}
+
+	/**
+	 * Set once pending bytes exceed the cap — either accumulated reads or a
+	 * declared `Content-Length` beyond it. `push` becomes a no-op so memory
+	 * stays bounded; callers must treat this as a protocol error and tear the
+	 * connection down.
+	 */
+	get overflowed(): boolean {
+		return this.#overflowed;
 	}
 
 	/** Append a freshly read chunk to the pending buffer. */
 	push(chunk: Buffer): void {
+		if (this.#overflowed || chunk.length === 0) return;
 		this.#pendingChunks.push(chunk);
 		this.#pendingLen += chunk.length;
+		if (this.#pendingLen > this.#maxPendingBytes) {
+			this.#overflowed = true;
+			this.#pendingChunks.length = 0;
+			this.#pendingLen = 0;
+		}
 	}
 
 	/**
@@ -121,6 +153,13 @@ export class MessageFramer {
 
 			const contentLength = Number.parseInt(contentLengthMatch[1], 10);
 			const messageStart = headerEnd + 4; // Skip \r\n\r\n
+			if (contentLength > this.#maxPendingBytes) {
+				// A body this large can never complete within the pending budget.
+				this.#overflowed = true;
+				this.#pendingChunks.length = 0;
+				this.#pendingLen = 0;
+				return;
+			}
 			const messageEnd = messageStart + contentLength;
 			if (this.#pendingLen < messageEnd) break;
 

@@ -22,6 +22,18 @@ const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 40;
 const DOUBLE_CRLF = Buffer.from("\r\n\r\n", "latin1");
 const CRLF = Buffer.from("\r\n", "latin1");
+
+/** Cap on the CONNECT head (bytes before the first CRLFCRLF). A legitimate
+ * CONNECT line is under 100 bytes; the debug proxy accepts no other request
+ * form, so this only guards against runaway header accumulation. */
+const CONNECT_HEAD_MAX_BYTES = 64 * 1024;
+/** Cap on a single tunneled HTTP message (headers + body). Real /v1/messages
+ * payloads peak in the tens of MB (large tool outputs); 64 MB leaves headroom
+ * while keeping the parser buffer bounded. */
+const HTTP_MESSAGE_MAX_BYTES = 64 * 1024 * 1024;
+/** Cap on a decompressed body (gzip/br/deflate). A small compressed payload
+ * must not be allowed to expand into a multi-GB buffer. */
+const DECODED_BODY_MAX_BYTES = 256 * 1024 * 1024;
 const TEXT_DECODER = new TextDecoder();
 
 // Debug-only local MITM certificate. Claude is launched with
@@ -259,19 +271,38 @@ function parseChunkedBody(buffer: Buffer): ChunkedParseResult {
 	}
 }
 
-class HttpMessageParser {
+export class HttpMessageParser {
 	readonly #kind: "request" | "response";
+	readonly #maxMessageBytes: number;
 	#buffer = Buffer.alloc(0);
 	#state: ParserState | null = null;
+	#overflowed = false;
 
-	constructor(kind: "request" | "response") {
+	constructor(kind: "request" | "response", maxMessageBytes = HTTP_MESSAGE_MAX_BYTES) {
 		this.#kind = kind;
+		this.#maxMessageBytes = maxMessageBytes;
+	}
+
+	/**
+	 * Set once buffered (or declared) message bytes exceed the cap. `push`
+	 * stops accumulating after this point so the buffer cannot keep growing;
+	 * callers must tear the connection down once they observe it.
+	 */
+	get overflowed(): boolean {
+		return this.#overflowed;
 	}
 
 	push(chunk: Buffer): ParsedHttpMessage[] {
+		if (this.#overflowed) return [];
 		if (chunk.length > 0) {
 			const data = Buffer.from(chunk);
 			this.#buffer = this.#buffer.length === 0 ? data : Buffer.concat([this.#buffer, data]);
+			if (this.#buffer.length > this.#maxMessageBytes) {
+				this.#overflowed = true;
+				this.#buffer = Buffer.alloc(0);
+				this.#state = null;
+				return [];
+			}
 		}
 		return this.#drain(false);
 	}
@@ -320,6 +351,12 @@ class HttpMessageParser {
 				continue;
 			}
 			if (state.bodyMode.kind === "fixed") {
+				if (state.bodyMode.length > this.#maxMessageBytes) {
+					this.#overflowed = true;
+					this.#buffer = Buffer.alloc(0);
+					this.#state = null;
+					return [];
+				}
 				if (this.#buffer.length < state.bodyMode.length) break;
 				const body = this.#buffer.subarray(0, state.bodyMode.length);
 				this.#buffer = this.#buffer.subarray(state.bodyMode.length);
@@ -392,12 +429,20 @@ function isBackgroundModelRequest(message: ParsedHttpMessage): boolean {
 	}
 }
 
-function decodeBody(headers: readonly HeaderEntry[], body: Buffer): string {
+export function decodeBody(
+	headers: readonly HeaderEntry[],
+	body: Buffer,
+	maxDecodedBytes = DECODED_BODY_MAX_BYTES,
+): string {
 	const encoding = headerValue(headers, "content-encoding")?.toLowerCase().trim();
 	try {
-		if (encoding === "gzip") return zlib.gunzipSync(body).toString("utf8");
-		if (encoding === "br") return zlib.brotliDecompressSync(body).toString("utf8");
-		if (encoding === "deflate") return zlib.inflateSync(body).toString("utf8");
+		// maxOutputLength bounds the decompression bomb: an over-cap payload
+		// makes zlib throw, and the catch below degrades to the raw (capped)
+		// bytes. Acceptable for a debug capture.
+		if (encoding === "gzip") return zlib.gunzipSync(body, { maxOutputLength: maxDecodedBytes }).toString("utf8");
+		if (encoding === "br")
+			return zlib.brotliDecompressSync(body, { maxOutputLength: maxDecodedBytes }).toString("utf8");
+		if (encoding === "deflate") return zlib.inflateSync(body, { maxOutputLength: maxDecodedBytes }).toString("utf8");
 	} catch {
 		return TEXT_DECODER.decode(body);
 	}
@@ -563,6 +608,10 @@ export class ClaudeMessagesProxy {
 		const onData = (chunk: Buffer) => {
 			const data = Buffer.from(chunk);
 			buffer = buffer.length === 0 ? data : Buffer.concat([buffer, data]);
+			if (buffer.length > CONNECT_HEAD_MAX_BYTES) {
+				socket.destroy();
+				return;
+			}
 			const headerEnd = buffer.indexOf(DOUBLE_CRLF);
 			if (headerEnd < 0) return;
 			socket.off("data", onData);
@@ -647,6 +696,11 @@ export class ClaudeMessagesProxy {
 			const data = Buffer.from(chunk);
 			upstreamTls.write(data);
 			const messages = requestParser.push(data);
+			if (requestParser.overflowed) {
+				clientTls.destroy();
+				upstreamTls.destroy();
+				return;
+			}
 			for (const message of messages) {
 				if (!isMessagesRequest(message) || isBackgroundModelRequest(message)) {
 					responseQueue.push(null);
@@ -660,6 +714,10 @@ export class ClaudeMessagesProxy {
 			const data = Buffer.from(chunk);
 			clientTls.write(data);
 			flushResponses(responseParser.push(data));
+			if (responseParser.overflowed) {
+				clientTls.destroy();
+				upstreamTls.destroy();
+			}
 		});
 		clientTls.on("end", () => {
 			try {

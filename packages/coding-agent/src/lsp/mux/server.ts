@@ -291,6 +291,11 @@ export class LspMuxServer {
 					logger.warn("LSP mux client sent malformed JSON", { error: String(error) });
 				}
 			}
+			if (session.framer.overflowed) {
+				logger.warn("LSP mux session frame buffer overflow; closing session");
+				socket.destroy();
+				return;
+			}
 		});
 		socket.on("error", error => logger.warn("LSP mux session socket error", { error: error.message }));
 		socket.on("close", () => void this.#closeSession(session));
@@ -468,6 +473,10 @@ export class LspMuxServer {
 					} catch (error) {
 						logger.warn("LSP mux server message handling failed", { server: server.key, error: String(error) });
 					}
+				}
+				if (framer.overflowed) {
+					logger.warn("LSP mux server frame buffer overflow; stopping reader", { server: server.key });
+					break;
 				}
 			}
 		} catch (error) {

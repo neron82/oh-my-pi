@@ -357,6 +357,39 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
 
+/** Retention window for `dumpLlmRequestToTmpDir` sidecars in $TMPDIR. */
+const LLM_REQUEST_DUMP_RETENTION_MS = 24 * 60 * 60 * 1000;
+const LLM_REQUEST_DUMP_PREFIX = "omp-llm-request-";
+
+/**
+ * Remove `omp-llm-request-*.json` sidecars in `tmpDir` older than the
+ * retention window. Invoked fire-and-forget from every dump so the
+ * secret-bearing files never accumulate in $TMPDIR; exported (and awaitable)
+ * so tests can drive a deterministic sweep against a temp dir.
+ */
+export async function pruneStaleLlmRequestDumps(tmpDir: string): Promise<void> {
+	let names: string[];
+	try {
+		names = await fs.promises.readdir(tmpDir);
+	} catch {
+		return; // Unreadable tmpdir: nothing to sweep this time.
+	}
+	await Promise.all(
+		names
+			.filter(name => name.startsWith(LLM_REQUEST_DUMP_PREFIX) && name.endsWith(".json"))
+			.map(async name => {
+				try {
+					const stats = await fs.promises.stat(path.join(tmpDir, name));
+					if (Date.now() - stats.mtimeMs > LLM_REQUEST_DUMP_RETENTION_MS) {
+						await fs.promises.unlink(path.join(tmpDir, name));
+					}
+				} catch {
+					// Concurrent dump/gc may have removed it; the sweep is best-effort.
+				}
+			}),
+	);
+}
+
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
 // Constants
@@ -9311,8 +9344,9 @@ export class AgentSession {
 	 * thinking/service tier, and converted messages — with no network round-trip
 	 * and no arming flag, so advisor/side requests cannot intercept it.
 	 *
-	 * The file persists on disk and may contain the same raw context/secrets
-	 * as `/dump`; treat the path accordingly.
+	 * The file persists for up to 24h (stale sidecars are swept on each dump)
+	 * and may contain the same raw context/secrets as `/dump`; it is written
+	 * owner-only (0600) — the same convention as other secret-bearing files.
 	 *
 	 * @returns the written file path, or `undefined` when there are no messages.
 	 */
@@ -9335,7 +9369,16 @@ export class AgentSession {
 			messages: llmMessages,
 		};
 		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
-		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
+		// The payload is raw session context (file contents, anything the user
+		// pasted, including credentials): create it owner-only instead of relying
+		// on the process umask, which would leave it world-readable in $TMPDIR.
+		const handle = await fs.promises.open(filePath, "wx", 0o600);
+		try {
+			await handle.writeFile(`${JSON.stringify(payload, null, 2)}\n`);
+		} finally {
+			await handle.close();
+		}
+		void pruneStaleLlmRequestDumps(os.tmpdir());
 		return filePath;
 	}
 

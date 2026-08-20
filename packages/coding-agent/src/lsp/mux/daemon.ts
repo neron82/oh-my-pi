@@ -94,6 +94,11 @@ function requestOnSocket(
 			else resolve({ response: message, leftover: framer.remainder() });
 			return;
 		}
+		if (framer.overflowed) {
+			cleanup();
+			reject(new Error("LSP mux frame buffer overflow"));
+			return;
+		}
 	};
 	const onClose = () => {
 		cleanup();

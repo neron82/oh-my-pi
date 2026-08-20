@@ -86,8 +86,12 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 	if (stability) {
 		const pct = (value: number) => `${Math.round(value * 1000) / 10}%`;
 		lines.push("## Prompt Stability (last request)\n");
-		lines.push(`Request #${stability.requestIndex} · model ${stability.modelId}${stability.appendOnly ? " · append-only" : ""}`);
-		lines.push(`Total prompt: ${stability.totalBytes} bytes (system ${stability.systemBytes}, tools ${stability.toolsBytes}, messages ${stability.messagesBytes})`);
+		lines.push(
+			`Request #${stability.requestIndex} · model ${stability.modelId}${stability.appendOnly ? " · append-only" : ""}`,
+		);
+		lines.push(
+			`Total prompt: ${stability.totalBytes} bytes (system ${stability.systemBytes}, tools ${stability.toolsBytes}, messages ${stability.messagesBytes})`,
+		);
 		lines.push(
 			`Stable prefix: ${stability.stablePrefixBytes} bytes (${pct(stability.estimatedCacheHitRatio)} estimated reuse)${stability.prefixRebuilt ? " · full prefix rebuild" : ""}`,
 		);
@@ -96,7 +100,9 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 			`System changed: ${stability.systemChanged ? "yes" : "no"} · tools changed: ${stability.toolsChanged ? "yes" : "no"}${stability.toolNamesAdded.length > 0 ? ` (+${stability.toolNamesAdded.join(", ")})` : ""}${stability.toolNamesRemoved.length > 0 ? ` (-${stability.toolNamesRemoved.join(", ")})` : ""} · model changed: ${stability.modelChanged ? "yes" : "no"}`,
 		);
 		if (stability.actualCacheHitRatio !== undefined) {
-			lines.push(`Provider-reported cache: ${stability.cacheReadTokens ?? 0} tokens read, ${stability.cacheWriteTokens ?? 0} written (${pct(stability.actualCacheHitRatio)} hit)`);
+			lines.push(
+				`Provider-reported cache: ${stability.cacheReadTokens ?? 0} tokens read, ${stability.cacheWriteTokens ?? 0} written (${pct(stability.actualCacheHitRatio)} hit)`,
+			);
 		}
 		lines.push("\n");
 	}
