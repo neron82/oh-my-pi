@@ -15,6 +15,11 @@ function userMessage(text: string): Message {
 	return { role: "user", content: text } as Message;
 }
 
+/** In-place content rewrite, the mutation shape a concurrent host transform could produce. */
+function mutateUserText(message: Message, text: string): void {
+	(message as { content: string }).content = text;
+}
+
 function tool(name: string, description = "a tool"): Tool {
 	return {
 		name,
@@ -161,7 +166,7 @@ describe("PromptStabilityMonitor", () => {
 		expect(report?.cacheReadTokens).toBeUndefined();
 	});
 
-	test("lastLiveContext returns references to the recorded sections", () => {
+	test("lastLiveContext returns wire references plus record-time canonical snapshots", () => {
 		const monitor = new PromptStabilityMonitor();
 		expect(monitor.lastLiveContext()).toBeUndefined();
 
@@ -171,9 +176,34 @@ describe("PromptStabilityMonitor", () => {
 		monitor.recordRequest({ systemPrompt, tools, messages } as Context, modelA);
 
 		const live = monitor.lastLiveContext();
-		expect(live?.systemPrompt).toBe(systemPrompt);
+		// Wire objects: adopted verbatim when alignment holds. systemPrompt is
+		// defensively copied at the array level (strings are immutable); the
+		// message/tool arrays stay by-reference.
+		expect(live?.systemPrompt).toEqual(systemPrompt);
 		expect(live?.tools).toBe(tools);
 		expect(live?.messages).toBe(messages);
+		// Record-time canonical snapshots: the alignment gate compares against
+		// these, never against re-canonicalizing the raw references.
+		expect(live?.systemCanonical).toBe(canonicalSystemPrompt(["live-system"]));
+		expect(live?.toolsCanonical).toBe(canonicalTools([tool("t")]));
+		expect(live?.messageCanonicals).toEqual(messages.map(m => canonicalMessage(m)));
+	});
+
+	test("recorded canonical snapshots do not track in-place mutation of recorded messages", () => {
+		// Regression: buildKvAlignedSummaryBase awaits replay construction
+		// between fetching lastLiveContext and comparing. If the snapshots were
+		// derived live from the raw references, a concurrent in-place rewrite of
+		// a recorded message would compare equal to its own mutated self and
+		// falsely adopt stale wire bytes.
+		const monitor = new PromptStabilityMonitor();
+		const messages = [userMessage("a"), userMessage("b")];
+		monitor.recordRequest({ systemPrompt: ["s"], tools: [], messages } as Context, modelA);
+
+		const live = monitor.lastLiveContext();
+		mutateUserText(messages[0]!, "rewritten-in-place");
+
+		expect(canonicalMessage(live!.messages[0]!)).not.toBe(live!.messageCanonicals[0]);
+		expect(live!.messageCanonicals[0]).toBe(canonicalMessage(userMessage("a")));
 	});
 
 	test("reset clears recorded state", () => {

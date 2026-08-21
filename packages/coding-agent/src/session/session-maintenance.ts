@@ -377,10 +377,15 @@ export async function buildKvAlignedSummaryBase(
 	const replayMessages = replayed.messages ?? [];
 	const liveMessages = live.messages;
 	const aligned =
-		canonicalSystemPrompt(replayed.systemPrompt) === canonicalSystemPrompt(live.systemPrompt) &&
-		canonicalTools(replayed.tools) === canonicalTools(live.tools) &&
-		replayMessages.length <= liveMessages.length &&
-		replayMessages.every((message, i) => canonicalMessage(message) === canonicalMessage(liveMessages[i]));
+		// Compare against the RECORD-TIME canonical snapshots, not the raw
+		// references: replay construction awaits above, so an in-place rewrite
+		// of a recorded message/tool in that window must fail alignment (and
+		// fall back to the always-correct replayed context) rather than let a
+		// stale reference compare equal to its own mutated self.
+		canonicalSystemPrompt(replayed.systemPrompt) === live.systemCanonical &&
+		canonicalTools(replayed.tools) === live.toolsCanonical &&
+		replayMessages.length <= live.messageCanonicals.length &&
+		replayMessages.every((message, i) => canonicalMessage(message) === live.messageCanonicals[i]);
 	const base = aligned
 		? {
 				systemPrompt: live.systemPrompt,

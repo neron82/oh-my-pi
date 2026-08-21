@@ -394,26 +394,43 @@ export class PromptStabilityMonitor {
 	}
 
 	/**
-	 * The final context sections of the most recent recorded request, by
-	 * reference. Used to build a KV-aligned compaction request: the compaction
-	 * summarization replays exactly the system prompt + tools that were last
-	 * on the wire, plus the verbatim shadowed region, so it becomes a prefix
-	 * extension of the last live request. `messages` is the recorded message
-	 * array itself (references, not copies) — a host-side replay of the
-	 * shadowed region is validated against it and, when byte-aligned, the
-	 * recorded wire bytes are adopted verbatim. Returns undefined before the
-	 * first recorded request.
+	 * The final context sections of the most recent recorded request. Used to
+	 * build a KV-aligned compaction request: the compaction summarization
+	 * replays exactly the system prompt + tools that were last on the wire,
+	 * plus the verbatim shadowed region, so it becomes a prefix extension of
+	 * the last live request.
+	 *
+	 * `systemPrompt`, `tools`, and `messages` are the recorded references (the
+	 * wire objects, for verbatim adoption when aligned); the `*Canonical`
+	 * fields are snapshots canonicalized at record time. Alignment validation
+	 * MUST use the canonical snapshots, never the raw references: the host's
+	 * replay construction awaits between fetching this context and comparing,
+	 * so an in-place rewrite of a recorded message/tool in that window would
+	 * otherwise make a stale reference compare equal to its own mutated self.
+	 * Comparing against record-time bytes makes any such drift fail alignment
+	 * and fall back to the (always-correct) replayed context. Returns
+	 * undefined before the first recorded request.
 	 */
 	lastLiveContext():
 		| {
 				systemPrompt: string[];
 				tools: Context["tools"];
 				messages: Message[];
+				systemCanonical: string;
+				toolsCanonical: string;
+				messageCanonicals: string[];
 		  }
 		| undefined {
 		const last = this.#last;
 		if (!last?.systemPrompt || last.systemPrompt.length === 0) return undefined;
-		return { systemPrompt: last.systemPrompt, tools: last.toolsRef ?? [], messages: last.messagesRef };
+		return {
+			systemPrompt: [...last.systemPrompt],
+			tools: last.toolsRef ?? [],
+			messages: last.messagesRef,
+			systemCanonical: last.system,
+			toolsCanonical: last.tools,
+			messageCanonicals: [...last.messages],
+		};
 	}
 
 	/** Drop all recorded state (new session / model reset). */
