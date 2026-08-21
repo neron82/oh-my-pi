@@ -8,7 +8,6 @@ import {
 	canonicalMessage,
 	canonicalSystemPrompt,
 	canonicalTools,
-	countTokens,
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,

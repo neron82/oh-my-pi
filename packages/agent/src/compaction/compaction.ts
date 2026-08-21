@@ -936,10 +936,9 @@ export async function generateSummary(
 	// retry can shrink — the state a cross-provider compaction boundary
 	// (see `prepareCompaction`) puts a long session into. One window is the
 	// common case and costs exactly the one call it always did.
-	const pending: SummaryWindow[] =
-		tokenizer.checkTokenBudget(wholeConversation, budgetTokens).fits
-			? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
-			: planSummaryWindows(llmMessages, tokenizer, dialect, budgetTokens).map(messages => ({ messages, budgetTokens }));
+	const pending: SummaryWindow[] = tokenizer.checkTokenBudget(wholeConversation, budgetTokens).fits
+		? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
+		: planSummaryWindows(llmMessages, tokenizer, dialect, budgetTokens).map(messages => ({ messages, budgetTokens }));
 	// KV-aligned mode summarizes the host-provided replay as one indivisible
 	// unit — the live prefix cannot be partitioned, so window planning does not
 	// apply; an oversized region fails this compaction attempt instead of
