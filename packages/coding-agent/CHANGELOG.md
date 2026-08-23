@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a small ASCII DeepSeek whale mark beneath the pi logo, model name, and provider in the startup welcome box.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added

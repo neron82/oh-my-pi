@@ -300,6 +300,8 @@ export class WelcomeComponent implements Component {
 			"",
 			this.#centerText(theme.fg("muted", this.modelName), leftCol),
 			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
+			"",
+			...DEEPSEEK_LOGO.map(l => this.#centerText(theme.fg("dim", l), leftCol)),
 		];
 
 		// Right column separator
@@ -481,6 +483,13 @@ export class WelcomeComponent implements Component {
 }
 
 export const PI_LOGO = ["▀██████████▀", " ╘██    ██  ", "  ██    ██  ", "  ██    ██  ", " ▄██▄  ▄██▄ "];
+
+/**
+ * Small ASCII whale (DeepSeek's mark) rendered beneath the pi logo, model
+ * name, and provider in the welcome box's left column. Kept narrow enough to
+ * fit the minimum left-column width (12) so it never forces a reflow.
+ */
+export const DEEPSEEK_LOGO = ['   .-""-.  ', "  /  _  \\  ", " |  (_)  | ", "  \\  ^  /  ", "   '-..-'  "];
 
 /** Multi-stop palette for the diagonal gradient. */
 const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
