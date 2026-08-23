@@ -1505,6 +1505,7 @@ export class SessionMaintenance {
 		preserveData: Record<string, unknown> | undefined;
 		method: CompactionMethod | undefined;
 		codexCompaction: CodexCompactionContext | undefined;
+		providerReplayThroughEntryId?: string;
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
@@ -1518,6 +1519,7 @@ export class SessionMaintenance {
 				fromExtension: args.fromExtension,
 				preserveData: args.preserveData,
 				method: args.method,
+				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 				tokensAfter: this.#projectCompactedContextTokens(args),
 			},
 		);
@@ -2998,6 +3000,9 @@ export class SessionMaintenance {
 					fromExtension: false,
 					codexCompaction: armedSpec.codexCompaction,
 					method: armedSpec.method,
+					providerReplayThroughEntryId: armedSpec.result.preserveData?.openaiRemoteCompaction
+						? armedSpec.snapshotLeafId
+						: undefined,
 					action,
 					reason,
 					willRetry,
@@ -3682,6 +3687,7 @@ export class SessionMaintenance {
 		fromExtension: boolean;
 		codexCompaction: CodexCompactionContext | undefined;
 		method: CompactionMethod | undefined;
+		providerReplayThroughEntryId?: string;
 		action: "context-full" | "handoff" | "snapcompact" | "remote";
 		reason: "overflow" | "threshold" | "idle" | "incomplete";
 		willRetry: boolean;
@@ -3720,6 +3726,7 @@ export class SessionMaintenance {
 			preserveData: args.preserveData,
 			codexCompaction: args.codexCompaction,
 			method: args.method,
+			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
 		});

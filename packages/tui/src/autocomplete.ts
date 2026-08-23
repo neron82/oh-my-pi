@@ -9,6 +9,7 @@ const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 function buildAutocompleteFuzzyDiscoveryProfile(
 	query: string,
 	basePath: string,
+	signal?: AbortSignal,
 ): {
 	query: string;
 	path: string;
@@ -16,6 +17,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 	hidden: boolean;
 	gitignore: boolean;
 	cache: boolean;
+	signal?: AbortSignal;
 } {
 	return {
 		query,
@@ -24,6 +26,7 @@ function buildAutocompleteFuzzyDiscoveryProfile(
 		hidden: true,
 		gitignore: true,
 		cache: true,
+		...(signal ? { signal } : {}),
 	};
 }
 
@@ -198,11 +201,12 @@ export interface SlashCommand {
 }
 
 export interface AutocompleteProvider {
-	/** Get autocomplete suggestions for current text/cursor position */
+	/** Get autocomplete suggestions for current text/cursor position. Expensive providers SHOULD stop when `signal` aborts. */
 	getSuggestions(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{
 		items: AutocompleteItem[];
 		prefix: string; // What we're matching against (e.g., "/" or "src/")
@@ -241,11 +245,13 @@ export interface AutocompleteProvider {
 	 * Force file-path completion (called on Tab). Returns matched items plus the
 	 * full prefix, or null when no path token sits before the cursor. Present on
 	 * file-aware providers; absent on slash-only ones.
+	 * Expensive providers SHOULD stop when `signal` aborts.
 	 */
 	getForceFileSuggestions?(
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null>;
 
 	/** Whether a Tab press should attempt file completion at the cursor. */
@@ -324,7 +330,7 @@ function buildSlashCommandCompletions(
 				};
 				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
 
-				const isSkillCommand = name.startsWith("skill:");
+				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
 				const nameScore =
 					lowerPrefix.length === 0 && isSkillCommand
 						? 950
@@ -383,7 +389,35 @@ function hasPromptTextBeforeSlash(
 	return textBeforeCursor.slice(0, slashStart).trim() !== "";
 }
 
-const SKILL_NAMESPACE = "skill:";
+export const SKILL_NAMESPACE = "skill:";
+
+/**
+ * Collapse `skill:*` commands into a single `/skill:` namespace row while the
+ * typed prefix has not committed to the namespace. Until the prefix starts
+ * with `skill:`, individual skills never list — a lone group entry (shown only
+ * while the prefix is still a prefix of `skill:`) keeps the `/` popup
+ * readable. Accepting the group inserts `/skill:` without a trailing space so
+ * the reopened popup expands to the individual skills.
+ */
+function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
+	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
+	let skillCount = 0;
+	let skillIcon: string | undefined;
+	const rest = commands.filter(cmd => {
+		if (!getCommandName(cmd)?.startsWith(SKILL_NAMESPACE)) return true;
+		skillCount += 1;
+		skillIcon ??= cmd.icon;
+		return false;
+	});
+	if (skillCount === 0) return commands;
+	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;
+	rest.push({
+		name: SKILL_NAMESPACE,
+		description: `${skillCount} skill${skillCount === 1 ? "" : "s"}`,
+		...(skillIcon && { icon: skillIcon }),
+	});
+	return rest;
+}
 
 /**
  * Whether a mid-prompt slash token (`prose … /tok`) is skill-shaped enough to
@@ -446,7 +480,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
@@ -474,7 +510,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 				const matches = isMidPromptSkillLookup
 					? buildMidPromptSkillCompletions(this.#commands, lowerPrefix)
-					: buildSlashCommandCompletions(this.#commands, lowerPrefix, this.#commandUsage);
+					: buildSlashCommandCompletions(
+							collapseSkillNamespace(this.#commands, lowerPrefix),
+							lowerPrefix,
+							this.#commandUsage,
+						);
 
 				if (matches.length > 0) {
 					return {
@@ -538,7 +578,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			}
 			const suggestions =
 				rawPrefix.length > 0
-					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix })
+					? await this.#getFuzzyFileSuggestions(rawPrefix, { isQuotedPrefix, signal })
 					: await this.#getFileSuggestions("@");
 			if (suggestions.length === 0 && rawPrefix.length > 0) {
 				const fallback = await this.#getFileSuggestions(atPrefix);
@@ -631,14 +671,18 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const slashPrefix = textBeforeCursor.slice(leadingSlashStart);
 			if (!slashPrefix.includes(" ") && !slashPrefix.slice(1).includes("/")) {
 				const beforeSlash = currentLine.slice(0, leadingSlashStart);
-				const newLine = `${beforeSlash}/${item.value} ${afterCursor}`;
+				// The collapsed `/skill:` namespace row completes to the namespace
+				// itself: no trailing space, so completion continues with the
+				// individual skills instead of finishing a command token.
+				const insert = item.value === SKILL_NAMESPACE ? `/${item.value}` : `/${item.value} `;
+				const newLine = `${beforeSlash}${insert}${afterCursor}`;
 				const newLines = [...lines];
 				newLines[cursorLine] = newLine;
 
 				return {
 					lines: newLines,
 					cursorLine,
-					cursorCol: beforeSlash.length + item.value.length + 2, // +2 for "/" and space
+					cursorCol: beforeSlash.length + insert.length,
 				};
 			}
 		}
@@ -981,12 +1025,16 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 	}
 
-	async #getFuzzyFileSuggestions(query: string, options: { isQuotedPrefix: boolean }): Promise<AutocompleteItem[]> {
+	async #getFuzzyFileSuggestions(
+		query: string,
+		options: { isQuotedPrefix: boolean; signal?: AbortSignal },
+	): Promise<AutocompleteItem[]> {
 		try {
 			const scopedQuery = await this.#resolveScopedFuzzyQuery(query);
+			if (options.signal?.aborted) return [];
 			const searchPath = scopedQuery?.baseDir ?? this.#basePath;
 			const fuzzyQuery = scopedQuery?.query ?? query;
-			const result = await fuzzyFind(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath));
+			const result = await fuzzyFind(buildAutocompleteFuzzyDiscoveryProfile(fuzzyQuery, searchPath, options.signal));
 			const lowerQuery = fuzzyQuery.toLowerCase();
 			const filteredMatches = result.matches.filter(entry => {
 				const p = entry.path.endsWith("/") ? entry.path.slice(0, -1) : entry.path;
@@ -1029,7 +1077,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
@@ -1099,7 +1149,13 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		const prefix = commandText.slice(1);
 		const lowerPrefix = prefix.toLowerCase();
 
-		const matches = buildSlashCommandCompletions(this.#commands, lowerPrefix, this.#commandUsage);
+		// The `/skill:` namespace row is excluded here: the sync path submits
+		// immediately after applying, and the bare namespace is not a command.
+		const matches = buildSlashCommandCompletions(
+			collapseSkillNamespace(this.#commands, lowerPrefix),
+			lowerPrefix,
+			this.#commandUsage,
+		).filter(item => item.value !== SKILL_NAMESPACE);
 
 		if (matches.length === 0) return null;
 		// Mirror `getSuggestions`: preserve leading whitespace so the editor's
