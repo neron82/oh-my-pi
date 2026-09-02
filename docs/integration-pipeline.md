@@ -40,13 +40,16 @@ The script runs the following stages, in order; each can be skipped:
    the fork's stability test suite, and `bun run test:rs` when the merge
    touched `crates/`. This is the safety net that catches upstream API churn
    breaking fork code that the merge kept.
-5. **Build** — compiles the `omp` binary exactly like a local release build
+5. **Build** — verifies the host native addon is fresh, then compiles the
+   `omp` binary exactly like a local release build
    (`bun packages/coding-agent/scripts/build-binary.ts`, which embeds the
    host's native addons and generated bundles).
-6. **Deploy** — smoke-tests the compiled binary (`omp --smoke-test`), refuses
-   to install on failure, then atomically replaces `<deploy>/omp`
-   (default `$HOME/.local/bin`, honoring `PI_INSTALL_DIR`). `--backup` keeps
-   the previous binary as `omp.previous`.
+6. **Deploy** — clears the loader's `~/.omp/natives/<version>` cache so the
+   freshly built binary's *own* embedded addon is exercised, smoke-tests the
+   compiled binary (`omp --smoke-test`), refuses to install on failure, then
+   atomically replaces `<deploy>/omp` (default `$HOME/.local/bin`, honoring
+   `PI_INSTALL_DIR`). `--backup` keeps the previous binary as
+   `omp.previous`.
 7. **Push** — pushes the integrated branch to the fork remote on GitHub.
 
 ```
@@ -55,6 +58,29 @@ integrate → check → build → deploy → push
    merge     tests               (--backup)
    resolve
 ```
+
+### Native addons (version-sentinel hardening)
+
+Upstream bumps the pi-natives version sentinel (`__piNativesV{major}_{minor}
+_{patch}`, derived from `packages/natives/package.json#version`) on every
+release. A `.node` built from an older release fails the loader's sentinel
+check at binary startup — the exact failure this pipeline hit on the v18.1.3
+integration, where the smoke gate caught the stale embed right before deploy.
+
+The pipeline now handles that automatically:
+
+- **Build stage** verifies that the host addon
+  (`packages/natives/native/pi_natives.<platform>-<arch>[-modern|-baseline].node`,
+  resolved through `scripts/host-detect.ts`) exposes the expected sentinel;
+  if it is missing or stale it rebuilds it via `bun run build:native` (the
+  repo's local Cargo/N-API host build) and hard-fails if the rebuilt addon
+  still lacks the sentinel. If the rebuild regenerates tracked bindings
+  (`native/index.js` / `native/index.d.ts`) differently from the merged tree,
+  it prints a reminder to commit them.
+- **Deploy stage** removes `~/.omp/natives/<version>` before the smoke test,
+  so the smoke run extracts and exercises the new binary's own embedded
+  addon instead of a cached leftover from an earlier build of the same
+  version.
 
 ## The protection manifest
 

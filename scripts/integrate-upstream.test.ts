@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { nativeVersionSentinel } from "./integrate-upstream";
 
 const SCRIPT_PATH = path.join(import.meta.dir, "integrate-upstream.ts");
 
@@ -218,6 +219,20 @@ async function bareSubject(bareRepo: string, ref: string, env: Record<string, st
 
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+});
+
+describe("nativeVersionSentinel", () => {
+	test("derives the exact sentinel the crate export and the JS loader agree on", () => {
+		// Deploy-time contract: a stale .node from an earlier release fails the
+		// loader's sentinel check and breaks every native feature, so the
+		// build-stage staleness check must derive byte-identical names.
+		expect(nativeVersionSentinel("18.1.3")).toBe("__piNativesV18_1_3");
+		expect(nativeVersionSentinel("18.0.3")).toBe("__piNativesV18_0_3");
+	});
+
+	test("maps non-alphanumerics to underscores so prereleases are valid JS identifiers", () => {
+		expect(nativeVersionSentinel("18.1.3-canary.2")).toBe("__piNativesV18_1_3_canary_2");
+	});
 });
 
 describe("integrate-upstream", () => {

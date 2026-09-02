@@ -6,7 +6,7 @@
 
 - Added a small ASCII DeepSeek whale mark beneath the pi logo, model name, and provider in the startup welcome box.
 - Added `snapcompact.maxFrames` setting: a hard cap on the image frames a snapcompact compaction archive may attach per request, clamping the window- and provider-derived frame budget (e.g. `1` for processors that reject multi-image requests).
-- Added an upstream-integration pipeline: `bun scripts/integrate-upstream.ts` merges upstream `main` into `prompt-cache-stability` while preserving the prompt-cache stability changes, runs the fork's checks, compiles the `omp` binary, installs it to `~/.local/bin`, and pushes the integrated branch to the fork remote.
+- Added an upstream-integration pipeline: `bun scripts/integrate-upstream.ts` merges upstream `main` into `prompt-cache-stability` while preserving the prompt-cache stability changes, runs the fork's checks, compiles the `omp` binary, installs it to `~/.local/bin`, and pushes the integrated branch to the fork remote. It also auto-rebuilds the native addon when upstream bumps its version sentinel, and clears the stale natives cache before the binary's smoke test.
 ## [18.1.3] - 2026-09-02
 
 ### Changed

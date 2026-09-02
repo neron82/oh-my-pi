@@ -8,6 +8,13 @@
  * `omp` binary, installs it into the deploy dir (default ~/.local/bin), and
  * pushes the result to the fork remote.
  *
+ * Native addons: upstream bumps the pi-natives version sentinel
+ * (`__piNativesV{major}_{minor}_{patch}`) on every release, which leaves the
+ * previously built `packages/natives/native/*.node` files stale. The build
+ * stage detects a stale host addon and rebuilds it via `bun run build:native`
+ * automatically; the deploy stage clears ~/.omp/natives/<version> so the
+ * smoke test validates the binary's own embedded addon.
+ *
  * Usage: bun scripts/integrate-upstream.ts [flags]
  *
  *   --repo <path>          Repo to operate on (default: this checkout).
@@ -48,12 +55,16 @@
  * build failed, deploy refused, push failed).
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
+import { detectHostAvx2Support, resolveLocalHostAddon } from "./host-detect";
 
 const SCRIPT_DIR = import.meta.dir;
 const MANIFEST_REL = path.join("scripts", "integrate", "fork-paths.json");
 const BUILD_SCRIPT_REL = path.join("packages", "coding-agent", "scripts", "build-binary.ts");
 const BUILD_OUTPUT_REL = path.join("packages", "coding-agent", "dist", "omp");
+const NATIVES_PKG_REL = path.join("packages", "natives", "package.json");
+const NATIVES_DIR_REL = path.join("packages", "natives", "native");
 
 const USAGE = `Usage: bun scripts/integrate-upstream.ts [flags]
 
@@ -533,7 +544,106 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 	}
 }
 
-async function runBuild(repoRoot: string): Promise<string> {
+/**
+ * Version sentinel the compiled native addon must expose. Contract shared
+ * with `crates/pi-natives` (the `#[napi]` export) and the loader in
+ * `packages/natives/native/index.js`: `__piNativesV{major}_{minor}_{patch}`,
+ * non-alphanumerics mapped to `_`. A stale `.node` (from an earlier release)
+ * fails the loader's check and breaks every native feature, so the build
+ * stage verifies and rebuilds before embedding.
+ */
+export function nativeVersionSentinel(version: string): string {
+	return `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
+}
+
+async function readNativesVersion(repoRoot: string): Promise<string> {
+	const pkg = (await readJson(path.join(repoRoot, NATIVES_PKG_REL))) as { version?: unknown } | null;
+	if (pkg === null || typeof pkg.version !== "string" || pkg.version.length === 0) {
+		throw new Error(`Cannot read natives version from ${path.join(repoRoot, NATIVES_PKG_REL)}.`);
+	}
+	return pkg.version;
+}
+
+/** Filename of the native addon the local Cargo/N-API build emits for this host. */
+function hostAddonFilename(): string {
+	return resolveLocalHostAddon({
+		platform: process.platform,
+		arch: process.arch,
+		avx2: detectHostAvx2Support(),
+	}).filename;
+}
+
+/**
+ * Whether the addon binary exposes the version sentinel. `grep -q` stops at
+ * the first match inside the multi-hundred-MB binary; on hosts without grep
+ * (win32) it reports false so the rebuild path triggers instead of trusting
+ * a possibly stale file.
+ */
+async function addonExposesSentinel(addonPath: string, sentinel: string): Promise<boolean> {
+	try {
+		const proc = Bun.spawn(["grep", "-a", "-q", sentinel, addonPath], { stdout: "ignore", stderr: "ignore" });
+		return (await proc.exited) === 0;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Ensure the host native addon under packages/natives/native is built from
+ * the current tree. Upstream bumps the sentinel on every release
+ * (`packages/natives/package.json#version`), so after an integration the
+ * previously embedded `.node` files are stale and would fail the compiled
+ * binary's smoke test. Rebuilds through the repo's own host path
+ * (`bun run build:native` → local Cargo/N-API build).
+ */
+async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<void> {
+	const nativesDir = path.join(repoRoot, NATIVES_DIR_REL);
+	const version = await readNativesVersion(repoRoot);
+	const sentinel = nativeVersionSentinel(version);
+	const hostFilename = hostAddonFilename();
+	const hostPath = path.join(nativesDir, hostFilename);
+
+	const exists = await fs.stat(hostPath).then(
+		() => true,
+		() => false,
+	);
+	if (exists && (await addonExposesSentinel(hostPath, sentinel))) {
+		console.log(`\n==> Native addon ${hostFilename} is current (${sentinel}); no rebuild needed`);
+		return;
+	}
+
+	console.log(`\n==> Host native addon missing or stale (expected ${sentinel} in ${hostFilename}); rebuilding`);
+	await runCommandInherit(repoRoot, ["bun", "run", "build:native"], "Rebuild host native addon (cargo/N-API)");
+
+	if (!(await addonExposesSentinel(hostPath, sentinel))) {
+		throw new Error(
+			`Native rebuild finished but ${hostPath} still does not expose ${sentinel}. The rebuild failed or produced the wrong addon, so the compiled binary would fail its smoke test.`,
+		);
+	}
+	console.log(`==> Native addon rebuilt: ${hostFilename} (${sentinel})`);
+
+	const dirtyBindings = (
+		await runGit(
+			repoRoot,
+			[
+				"status",
+				"--porcelain",
+				"--",
+				path.join("packages", "natives", "native", "index.js"),
+				path.join("packages", "natives", "native", "index.d.ts"),
+			],
+			{ verbose },
+		)
+	).stdout.trim();
+	if (dirtyBindings.length > 0) {
+		console.log(
+			"    note: regenerated native bindings differ from the merged tree — `git add packages/natives/native` before pushing.",
+		);
+	}
+}
+
+async function runBuild(repoRoot: string, verbose: boolean): Promise<string> {
+	await ensureHostNatives(repoRoot, verbose);
 	const buildScript = path.join(repoRoot, BUILD_SCRIPT_REL);
 	await runCommandInherit(repoRoot, ["bun", buildScript], "Compile omp binary (build-binary.ts)");
 	const built = path.join(repoRoot, BUILD_OUTPUT_REL);
@@ -558,12 +668,28 @@ async function binaryVersion(binaryPath: string): Promise<string | null> {
 }
 
 async function runDeploy(
+	repoRoot: string,
 	built: string,
 	deployDir: string,
 	backup: boolean,
 	smoke: boolean,
 ): Promise<{ oldVersion: string | null; newVersion: string | null }> {
 	await fs.mkdir(deployDir, { recursive: true });
+
+	// The native loader caches extracted addons per version under
+	// ~/.omp/natives/<version>. Clear the current version's cache so the
+	// freshly built binary's own embedded addon is extracted and validated,
+	// never a leftover from an earlier build/release of the same version.
+	const nativesVersion = await readNativesVersion(repoRoot);
+	const nativesCacheDir = path.join(os.homedir(), ".omp", "natives", nativesVersion);
+	const cacheExisted = await fs.stat(nativesCacheDir).then(
+		() => true,
+		() => false,
+	);
+	if (cacheExisted) {
+		await fs.rm(nativesCacheDir, { recursive: true, force: true });
+		console.log(`==> Cleared stale natives cache ${nativesCacheDir}`);
+	}
 
 	const newVersion = await binaryVersion(built);
 	console.log(`\n==> Built binary: ${built} (${newVersion ?? "unknown version"})`);
@@ -894,13 +1020,13 @@ async function main(): Promise<void> {
 
 	let built: string | null = null;
 	if (!flags.noBuild) {
-		built = await runBuild(repoRoot);
+		built = await runBuild(repoRoot, flags.verbose);
 		summary.push(`built ${path.relative(repoRoot, built)}`);
 	}
 
 	if (!flags.noDeploy && built !== null) {
 		const deployDir = planDeployTarget(flags, manifest);
-		const deployed = await runDeploy(built, deployDir, flags.backup, !flags.noSmoke);
+		const deployed = await runDeploy(repoRoot, built, deployDir, flags.backup, !flags.noSmoke);
 		summary.push(
 			`deployed to ${path.join(deployDir, "omp")} (${deployed.oldVersion ?? "?"} -> ${deployed.newVersion ?? "?"})`,
 		);
