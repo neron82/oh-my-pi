@@ -2346,6 +2346,7 @@ export class SessionMaintenance {
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
 				snapcompact.providerFrameBudget(this.#model?.provider),
+				this.#configuredSnapcompactMaxFrames(),
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -2389,7 +2390,19 @@ export class SessionMaintenance {
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
 			snapcompact.providerFrameBudget(this.#model?.provider),
+			this.#configuredSnapcompactMaxFrames(),
 		);
+	}
+
+	/**
+	 * The user-configured frame ceiling (`snapcompact.maxFrames`), or
+	 * `Infinity` when unset or non-positive. Callers add it to the derived
+	 * cap's `Math.min`, so an explicit positive value can only lower the
+	 * window-, data-, and provider-derived budget — never raise it.
+	 */
+	#configuredSnapcompactMaxFrames(): number {
+		const configured = this.#host.settings.get("snapcompact.maxFrames");
+		return configured !== undefined && configured >= 1 ? configured : Infinity;
 	}
 
 	#snapcompactFramePayloadBytes(result: snapcompact.CompactionResult): number {
@@ -2665,6 +2678,7 @@ export class SessionMaintenance {
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
 				snapcompact.providerFrameBudget(this.#model?.provider),
+				this.#configuredSnapcompactMaxFrames(),
 			);
 		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
@@ -2685,6 +2699,7 @@ export class SessionMaintenance {
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
 			snapcompact.providerFrameBudget(this.#model?.provider),
+			this.#configuredSnapcompactMaxFrames(),
 		);
 	}
 

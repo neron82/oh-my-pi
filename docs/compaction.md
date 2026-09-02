@@ -438,6 +438,7 @@ From `settings-schema.ts`:
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
 - `snapcompact.shape` = `"auto"`
+- `snapcompact.maxFrames` = unset. An explicit positive integer is a hard cap on the archive's image frames: the effective cap is the minimum of the window-, data-, and provider-derived budgets and this value (e.g. `1` for a processor that rejects multi-image requests). Unset or `0` preserves the existing derived budget.
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
 

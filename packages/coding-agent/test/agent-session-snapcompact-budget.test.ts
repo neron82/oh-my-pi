@@ -287,6 +287,88 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 	});
 
+	it("clamps maxFrames to the configured snapcompact.maxFrames ceiling", async () => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		// A provider whose 5-frame image budget exceeds the configured
+		// ceiling, so the derived cap — not the ceiling — is what shrinks.
+		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+		session.settings.set("snapcompact.maxFrames", 1);
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		// A processor that rejects multi-image requests (e.g. vLLM's
+		// Qwen3VLProcessor) needs at most one frame in the compacted message.
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(1);
+	});
+
+	it("does not raise the derived frame budget when snapcompact.maxFrames exceeds it", async () => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+		// The configured ceiling (10) is above the provider's 5-frame image
+		// budget: the user cap clamps, it never raises.
+		session.settings.set("snapcompact.maxFrames", 10);
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
+	it("treats snapcompact.maxFrames of 0 as unset", async () => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+		session.settings.set("snapcompact.maxFrames", 0);
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
 	it("keeps the frame archive out of the RPC result after persisting it", async () => {
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
