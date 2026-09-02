@@ -111,9 +111,7 @@ async function makeFixture(
 			await git(work, ["push", "upstream", "--tags"], env);
 			const sha = (
 				await new Response(
-					(
-						await Bun.spawn(["git", "rev-parse", "upstream/main"], { cwd: work, env })
-					).stdout,
+					(await Bun.spawn(["git", "rev-parse", "upstream/main"], { cwd: work, env })).stdout,
 				).text()
 			).trim();
 			await git(upstream, ["tag", "v99.0.0", sha], env);

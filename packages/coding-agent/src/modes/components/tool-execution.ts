@@ -37,6 +37,10 @@ import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 
+/** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
+export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
+	return tool?.name ?? wireName;
+}
 /**
  * Drop trailing removal/hunk-header lines that appear in a streaming diff
  * before the matching `+added` lines have arrived. Without this, a partial
@@ -904,6 +908,17 @@ export class ToolExecutionComponent extends Container {
 		return (
 			this.#displaceableByToolName !== undefined && this.#displaceableByToolName === nextToolName && !this.#sealed
 		);
+	}
+
+	/**
+	 * A live block torn down through the generic Container path (transcript
+	 * clear, session switch mid-run) must not leak its shared-ticker
+	 * registration: the dead component would keep the process-wide 80ms
+	 * interval alive and keep being repainted.
+	 */
+	override dispose(): void {
+		this.stopAnimation();
+		super.dispose();
 	}
 
 	/**

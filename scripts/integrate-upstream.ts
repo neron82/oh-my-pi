@@ -690,7 +690,7 @@ async function syncManifest(
 
 	const reviewSet = new Set(manifest.requiresManualReview);
 	const existingTests = new Set(manifest.tests);
-	const newForkWins = [...new Set([...forkPaths])].filter(pathName => !reviewSet.has(pathName)).sort();
+	const newForkWins = [...new Set(forkPaths)].filter(pathName => !reviewSet.has(pathName)).sort();
 	const newTests = [
 		...new Set([...existingTests, ...newForkWins.filter(pathName => pathName.endsWith(".test.ts"))]),
 	].sort();

@@ -230,7 +230,7 @@ export class PromptStabilityMonitor {
 		const toolList = tools ?? [];
 		const toolCanonical = canonicalTools(toolList);
 		const toolNames = toolList.map(t => t.name);
-		const messageCanonicals: string[] = new Array(messages.length);
+		const messageCanonicals: string[] = Array.from({ length: messages.length }, () => "");
 		for (let i = 0; i < messages.length; i++) {
 			messageCanonicals[i] = canonicalMessage(messages[i] as unknown);
 		}

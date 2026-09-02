@@ -3,7 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { CURSOR_MARKER, Editor, type EditorTheme, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type ComposerStyle,
+	CURSOR_MARKER,
+	Editor,
+	type EditorTheme,
+	registerComposerStyle,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
@@ -38,6 +45,20 @@ describe("Editor component", () => {
 			editor.setText("alfa beta gamma");
 			editor.handleInput("\x1b[127;5u"); // kitty CSI-u ctrl+backspace
 			expect(editor.getText()).toBe("alfa beta ");
+		});
+
+		it("deletes the next word for Ghostty's physical Option+Forward-Delete wire", () => {
+			setKittyProtocolActive(true);
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				editor.setText("foo bar baz");
+				editor.handleInput("\x01"); // Ctrl+A
+				for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C"); // After "foo"
+				editor.handleInput("\x1b[3;11~"); // Ghostty Option+Forward-Delete
+				expect(editor.getText()).toBe("foo baz");
+			} finally {
+				setKittyProtocolActive(false);
+			}
 		});
 	});
 
@@ -2926,6 +2947,39 @@ describe("Editor component", () => {
 			expect(stripVTControlCharacters(line)).not.toContain("▌");
 			expect(visibleWidth(line)).toBe(20);
 			expect(line).toContain("\x1b[44m");
+		});
+
+		it("preserves filled extension foregrounds when legacy styles omit filledSurface", () => {
+			const style: ComposerStyle = {
+				id: "legacy-filled-extension",
+				sideBorders: false,
+				verticalChrome: 0,
+				statusAttachment: "none",
+				bottomBar: "none",
+				bottomBarGap: false,
+				defaultPromptGutter: undefined,
+				defaultPaddingX: () => 0,
+				sideChromeWidth: () => 0,
+				renderTop: () => undefined,
+				renderRow: context => [context.surfaceColor(context.text + context.pad)],
+				renderBottom: () => undefined,
+			};
+			const unregister = registerComposerStyle(style);
+			try {
+				const editor = new Editor({
+					...unicodeTheme,
+					textColor: text => `\x1b[31m${text}\x1b[39m`,
+					surfaceColor: text => `\x1b[44m\x1b[37m${text}\x1b[39m\x1b[49m`,
+				});
+				editor.setBorderStyle(style.id);
+				editor.setText("hello");
+
+				const [line] = editor.render(20);
+				expect(line).toContain("\x1b[44m\x1b[37mhello");
+				expect(line).not.toContain("\x1b[44m\x1b[37m\x1b[31m");
+			} finally {
+				unregister();
+			}
 		});
 	});
 });
