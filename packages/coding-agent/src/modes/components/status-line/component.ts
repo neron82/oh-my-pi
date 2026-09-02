@@ -36,6 +36,7 @@ import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCa
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
+import { formatUsageStatLine } from "./usage-line";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
@@ -364,6 +365,9 @@ export class StatusLineComponent implements Component {
 	#renderRevision = 0;
 	#settings: StatusLineSettings = {};
 	#effectiveSettings: EffectiveStatusLineSettings | undefined;
+	/** Rendered second line below the status bar (tok/s · cache hit · totals),
+	 * recomputed every bar build from `SegmentContext.usageStats`. */
+	#usageStatLine: string | null = null;
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
 	#cachedBranchCwd: string | undefined = undefined;
@@ -500,6 +504,7 @@ export class StatusLineComponent implements Component {
 			rightSegments: settings.get("statusLine.rightSegments"),
 			separator: settings.get("statusLine.separator"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
+			usageLine: settings.get("statusLine.usageLine"),
 			segmentOptions: settings.getGroup("statusLine").segmentOptions,
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
@@ -1927,6 +1932,9 @@ export class StatusLineComponent implements Component {
 			includePr,
 			previewTitle,
 		);
+		// Second row under the bar: live tok/s, provider-reported cache-hit
+		// rate, and cumulative session input/output — all measured usage.
+		this.#usageStatLine = formatUsageStatLine(ctx.usageStats);
 		const separatorDef = plain
 			? { left: "·", right: "·" }
 			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
@@ -2413,6 +2421,9 @@ export class StatusLineComponent implements Component {
 		if (bottomBar !== "none") {
 			const main = this.renderBottomBar(width, bottomBar);
 			if (main) lines.push(main);
+			if ((this.#settings.usageLine ?? true) && this.#usageStatLine) {
+				lines.push(theme.fg("dim", truncateToWidth(this.#usageStatLine, width)));
+			}
 		}
 		return lines;
 	}
@@ -2424,6 +2435,11 @@ export class StatusLineComponent implements Component {
 			if (content) {
 				if (this.#standaloneGap) lines.push("");
 				lines.push(content);
+			}
+			// The measured-usage line below the bar (tok/s · cache hit ·
+			// session totals). Same cadence as the bar: recomputed every build.
+			if ((this.#settings.usageLine ?? true) && this.#usageStatLine) {
+				lines.push(theme.fg("dim", truncateToWidth(this.#usageStatLine, width)));
 			}
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;

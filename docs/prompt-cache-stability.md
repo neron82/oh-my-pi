@@ -161,8 +161,13 @@ same requests are simply fully prefilled.
 - **Debug log:** every model request logs a one-line prompt-stability report
   (`logger.debug`, `prompt-stability` category): total bytes, stable-prefix bytes,
   first divergence point, invalidation cause, estimated vs actual cache-hit ratio.
-- **TUI:** the info panel (the line next to `Append-Only`) shows the last
-  stability report, e.g. `Cache: 97% prefix reused (appended 1.2KB)`.
+- **TUI:** the status line's `cache_hit` segment shows the provider-reported
+  cache-hit rate, and a second measured-usage line renders below the bar
+  (`statusLine.usageLine`, default on): live token speed, cache-hit rate, and
+  cumulative session input/output — e.g.
+  `100 tok/s | Cache hit 99% | Input 46.8M tok · Output 194K tok`, computed
+  from the same real usage accounting described here, not the monitor's
+  byte estimate.
 - **Session dump:** `formatSessionDumpText` gains a `prompt-cache` section with
   the per-request reports for the current run.
 - **OTEL:** chat spans carry `pi.prompt_stability.*` attributes (stable-prefix

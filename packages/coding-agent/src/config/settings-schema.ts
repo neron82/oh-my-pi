@@ -965,6 +965,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"statusLine.usageLine": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Usage Stat Line",
+			description:
+				"Show a second line below the status bar with measured session figures: token speed, provider-reported cache-hit rate, and cumulative input/output totals (e.g. 100.0 tok/s | Cache hit 99% | Input 46.8M tok · Output 194K tok). Computed from live usage accounting; hidden until the first request records usage.",
+		},
+	},
+
 	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
 
 	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },

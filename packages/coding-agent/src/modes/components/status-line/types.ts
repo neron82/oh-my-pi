@@ -44,6 +44,9 @@ export interface StatusLineSettings {
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
 	contextLine?: ContextLineMode;
+	/** Second line below the status bar with measured usage (tok/s, cache-hit
+	 *  rate, session input/output totals). Default on. */
+	usageLine?: boolean;
 }
 
 export type EffectiveStatusLineSettings = Required<

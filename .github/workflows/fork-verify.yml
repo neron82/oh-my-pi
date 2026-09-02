@@ -67,6 +67,7 @@ jobs:
           packages/coding-agent/test/session/advisor-stability.test.ts
           packages/coding-agent/test/session/llm-request-dump-sidecar.test.ts
           packages/coding-agent/test/session/session-dump-format.test.ts
+          packages/coding-agent/test/status-line-usage-line.test.ts
 
       - name: Type-check workspace
         run: bun run check:ts

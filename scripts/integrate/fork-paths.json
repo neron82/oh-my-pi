@@ -29,6 +29,10 @@
 		"packages/coding-agent/src/lsp/mux/daemon.ts",
 		"packages/coding-agent/src/lsp/mux/server.ts",
 		"packages/coding-agent/src/mcp/render.ts",
+		"packages/coding-agent/src/modes/components/status-line/component.ts",
+		"packages/coding-agent/src/modes/components/status-line/index.ts",
+		"packages/coding-agent/src/modes/components/status-line/types.ts",
+		"packages/coding-agent/src/modes/components/status-line/usage-line.ts",
 		"packages/coding-agent/src/modes/components/welcome.ts",
 		"packages/coding-agent/src/session/agent-session.ts",
 		"packages/coding-agent/src/session/session-advisors.ts",
@@ -44,7 +48,8 @@
 		"packages/coding-agent/test/mcp-render-status.test.ts",
 		"packages/coding-agent/test/session/advisor-stability.test.ts",
 		"packages/coding-agent/test/session/llm-request-dump-sidecar.test.ts",
-		"packages/coding-agent/test/session/session-dump-format.test.ts"
+		"packages/coding-agent/test/session/session-dump-format.test.ts",
+		"packages/coding-agent/test/status-line-usage-line.test.ts"
 	],
 	"requiresManualReview": [
 		"packages/coding-agent/CHANGELOG.md"
@@ -62,6 +67,7 @@
 		"packages/coding-agent/test/mcp-render-status.test.ts",
 		"packages/coding-agent/test/session/advisor-stability.test.ts",
 		"packages/coding-agent/test/session/llm-request-dump-sidecar.test.ts",
-		"packages/coding-agent/test/session/session-dump-format.test.ts"
+		"packages/coding-agent/test/session/session-dump-format.test.ts",
+		"packages/coding-agent/test/status-line-usage-line.test.ts"
 	]
 }
