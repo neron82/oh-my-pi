@@ -714,6 +714,7 @@ function resolveOpenAIResponsesPolicy(
 		supportsImageDetailOriginal: !isXaiHost && !modelMatchesHost(hostModel, "githubCopilot"),
 		supportsReasoningSummary: !isXaiHost,
 		supportsAllTurnsReasoningContext: false,
+		supportsConfigurationUpdate: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,
@@ -815,6 +816,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
+		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		officialEndpoint: compat.officialEndpoint,
 		harmonyLeakMitigation: compat.harmonyLeakMitigation,
 		cacheControlFormat: compat.cacheControlFormat,
@@ -903,6 +905,7 @@ function resolveGooglePolicy(
 	const compat: ResolvedGoogleCompat = {
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
+		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
 		dropUnsignedThinking: false,
 		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,
