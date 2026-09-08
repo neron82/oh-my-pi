@@ -565,6 +565,8 @@ async function runInteractiveMode(
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+		// Recover deferred runs after the TUI is subscribed so resumed-turn events reach the host.
+		await session.resumeDeferredRuns();
 	} catch (error) {
 		mode.stop();
 		throw error;

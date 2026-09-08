@@ -110,8 +110,8 @@ export class DeferredRunManager {
 	/** Try to resume a session, validating generation and atomically consuming. */
 	async #tryResume(session: DeferredSessionInfo, header: SessionHeader, entry: DeferredResumeEntry): Promise<void> {
 		try {
-			const currentGeneration = header.generation;
-			if (currentGeneration === undefined || currentGeneration !== entry.generation) {
+			const currentGeneration = header.generation ?? 0;
+			if (currentGeneration !== entry.generation) {
 				return; // Generation mismatch — stale resume
 			}
 
@@ -130,8 +130,8 @@ export class DeferredRunManager {
 			const header = await this.#callbacks.loadSessionHeader(info.sessionFile);
 			if (!header) return; // Session no longer exists
 
-			const currentGeneration = header.generation;
-			if (currentGeneration === undefined || currentGeneration !== info.generation) {
+			const currentGeneration = header.generation ?? 0;
+			if (currentGeneration !== info.generation) {
 				return; // Generation mismatch — stale resume
 			}
 

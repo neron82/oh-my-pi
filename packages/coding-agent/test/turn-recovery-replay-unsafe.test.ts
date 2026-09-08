@@ -93,6 +93,7 @@ function createHost(
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
+		scheduleDeferredResume: () => {},
 	};
 }
 

@@ -56,7 +56,8 @@
 		"packages/coding-agent/src/session/turn-recovery.ts",
 		"packages/coding-agent/src/session/agent-session-events.ts",
 		"packages/coding-agent/src/modes/controllers/event-controller.ts",
-		"packages/coding-agent/test/session/deferred-resume.test.ts"
+		"packages/coding-agent/test/session/deferred-resume.test.ts",
+		"packages/coding-agent/src/main.ts"
 	],
 	"requiresManualReview": [
 		"packages/coding-agent/CHANGELOG.md"

@@ -231,6 +231,8 @@ export interface TurnRecoveryHost {
 		},
 	): Promise<RecoveryCompactionResult>;
 	withBashBranchTransition<T>(operation: () => T): T;
+	/** Schedule a durable deferred resume after appending the entry. */
+	scheduleDeferredResume(sessionFile: string, entry: DeferredResumeEntry): void;
 }
 
 /** Construction-time retry state restored from model selection. */
@@ -2447,6 +2449,10 @@ export class TurnRecovery {
 				};
 
 				this.#host.sessionManager.appendDeferredResume(entry);
+				const sessionFile = this.#host.sessionManager.getSessionFile();
+				if (sessionFile) {
+					this.#host.scheduleDeferredResume(sessionFile, entry);
+				}
 
 				await this.#host.emitSessionEvent({
 					type: "deferred_resume_scheduled",

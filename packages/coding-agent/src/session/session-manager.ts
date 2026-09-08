@@ -1125,6 +1125,7 @@ export class SessionManager {
 			cwd: this.#cwd,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
+			generation: 0,
 		};
 		const workspace = normalizeSessionWorkspace({
 			cwd: this.#cwd,

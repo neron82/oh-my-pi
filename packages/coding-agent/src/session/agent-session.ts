@@ -346,6 +346,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
+import { DeferredRunManager } from "./deferred-run-manager";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
@@ -649,6 +650,7 @@ export class AgentSession {
 
 	// Retry state
 	readonly #recovery: TurnRecovery;
+	readonly #deferredRunManager: DeferredRunManager;
 	#textOutputCommitted = true;
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
@@ -1342,8 +1344,24 @@ export class AgentSession {
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
+			scheduleDeferredResume: (sessionFile, entry) =>
+				this.#deferredRunManager.scheduleResume(this.sessionId, sessionFile, entry),
 		};
 		this.#recovery = new TurnRecovery(recoveryHost, { initialRetryFallback: config.initialRetryFallback });
+		this.#deferredRunManager = new DeferredRunManager({
+			listSessions: async () => {
+				const sessionFile = this.sessionManager.getSessionFile();
+				if (!sessionFile) return [];
+				return [{ sessionId: this.sessionId, sessionFile }];
+			},
+			loadSessionHeader: async () => this.sessionManager.getHeader(),
+			findDeferredResume: async () => this.sessionManager.findDeferredResume(),
+			consumeDeferredResume: async () => this.sessionManager.consumeDeferredResume(),
+			cancelDeferredResume: async () => this.sessionManager.cancelDeferredResume(),
+			resumeSession: () => {
+				this.#scheduleAgentContinue({ source: "deferred-resume" });
+			},
+		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!this.settings.get("retry.usageAwareFallback") ||
@@ -4531,6 +4549,7 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		this.#deferredRunManager.destroy();
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
@@ -9715,6 +9734,18 @@ export class AgentSession {
 	async invalidateDeferredResume(): Promise<void> {
 		await this.sessionManager.incrementSessionGeneration();
 		await this.sessionManager.cancelDeferredResume();
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (sessionFile) {
+			this.#deferredRunManager.cancelResume(this.sessionId, sessionFile);
+		}
+	}
+
+	/**
+	 * Scan for deferred resumes on startup and schedule/resume any that are
+	 * ready. Called after session construction to recover interrupted runs.
+	 */
+	async resumeDeferredRuns(): Promise<void> {
+		await this.#deferredRunManager.init();
 	}
 
 	/**
