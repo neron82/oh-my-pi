@@ -63,7 +63,7 @@ import {
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { getLatestCompactionEntry } from "./session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, type DeferredResumeEntry, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -2421,6 +2421,49 @@ export class TurnRecovery {
 			effectiveUsageLimitWaitMs !== undefined &&
 			delayMs <= effectiveUsageLimitWaitMs;
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
+			// Check if this is a usage-limit error with provider-stated timing that qualifies
+			// for durable deferred resume instead of failing.
+			const isUsageLimit = AIError.is(id, AIError.Flag.UsageLimit);
+			const hasProviderTiming =
+				parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome?.reportResetAtMs !== undefined;
+
+			if (isUsageLimit && hasProviderTiming) {
+				// Create deferred resume entry
+				const resumeAt = Date.now() + delayMs;
+				const generation = this.#host.sessionManager.getSessionGeneration() ?? 0;
+				const currentModel = this.#host.model();
+				const modelId = currentModel ? `${currentModel.provider}/${currentModel.id}` : "unknown";
+
+				const entry: DeferredResumeEntry = {
+					type: "deferred_resume",
+					id: `deferred-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					resume_at: resumeAt,
+					generation,
+					error_message: errorMessage,
+					model: modelId,
+					reason: "usage_limit_reached",
+				};
+
+				this.#host.sessionManager.appendDeferredResume(entry);
+
+				await this.#host.emitSessionEvent({
+					type: "deferred_resume_scheduled",
+					resumeAt,
+					errorMessage,
+					reason: "usage_limit_reached",
+				});
+
+				// End the current request cleanly
+				await this.persistTerminalEmptyErrorTurn(message);
+				this.#retryAttempt = 0;
+				this.#clearPendingRetryErrors();
+				this.resolveRetry();
+				return false;
+			}
+
+			// Not a usage-limit error with provider timing — fail as before
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;

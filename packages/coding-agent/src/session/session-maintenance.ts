@@ -128,6 +128,15 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	automaticContinuationBlocked: true,
 };
 
+/**
+ * Maximum consecutive automatic retries after a `length`-stopped response.
+ * Each scheduled retry is durably marked in the active branch, so a restart
+ * cannot reset a loop that is already consuming the model's output budget.
+ */
+export const INCOMPLETE_RECOVERY_MAX_RETRIES = 3;
+const INCOMPLETE_RECOVERY_RETRY_MARKER = "incomplete-recovery-retry";
+const INCOMPLETE_RECOVERY_RETRY_PRESERVE_KEY = "incompleteRecoveryRetry";
+
 /** Whether a configured preference list contains at least one automatic method. */
 function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
@@ -464,6 +473,49 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	/** Clears maintenance state scoped to the prompt that just ended. */
+	resetForNewPrompt(): void {
+		this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
+	}
+
+	/**
+	 * Count recovery retries immediately preceding the active failed turn.
+	 * Recovery metadata is stored on its compaction entry when one exists, so
+	 * the compaction remains the branch tail. Shake/promotion retries have no
+	 * compaction entry and use an otherwise inert custom marker instead.
+	 */
+	#incompleteRecoveryRetryCount(): number {
+		const branch = this.#host.sessionManager.getBranch();
+		let index = branch.length - 1;
+		const tail = branch[index];
+		if (tail?.type === "message" && tail.message.role === "assistant" && tail.message.stopReason === "length") {
+			index--;
+		}
+		let retries = 0;
+		while (true) {
+			const entry = branch[index];
+			const isRetryMarker =
+				(entry?.type === "custom" && entry.customType === INCOMPLETE_RECOVERY_RETRY_MARKER) ||
+				(entry?.type === "compaction" && entry.preserveData?.[INCOMPLETE_RECOVERY_RETRY_PRESERVE_KEY] === true);
+			if (!isRetryMarker) break;
+			retries++;
+			index--;
+		}
+		return retries;
+	}
+
+	async #recordIncompleteRecoveryRetry(compactionEntry: CompactionEntry | null | undefined): Promise<void> {
+		if (compactionEntry) {
+			compactionEntry.preserveData = {
+				...compactionEntry.preserveData,
+				[INCOMPLETE_RECOVERY_RETRY_PRESERVE_KEY]: true,
+			};
+			await this.#host.sessionManager.rewriteEntries();
+			return;
+		}
+		this.#host.sessionManager.appendCustomEntry(INCOMPLETE_RECOVERY_RETRY_MARKER);
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -1096,7 +1148,7 @@ export class SessionMaintenance {
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 							extraContext: compactionPrep.hookContext,
-							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+							remoteSystemPrompt: this.#host.baseSystemPrompt(),
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
@@ -1458,7 +1510,7 @@ export class SessionMaintenance {
 				{
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
-					remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+					remoteSystemPrompt: this.#host.baseSystemPrompt(),
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
 					// sticky provider sessions by sessionId, and a speculation
@@ -2023,6 +2075,20 @@ export class SessionMaintenance {
 		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so a
 		// reachable handoff preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
+			if (this.#incompleteRecoveryRetryCount() >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
+				const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
+				const notice =
+					`Response stopped because it reached its length limit ${INCOMPLETE_RECOVERY_MAX_RETRIES + 1} times in a row; ` +
+					"automatic recovery has paused to avoid an infinite retry loop.";
+				logger.warn("Incomplete response recovery retry limit reached", {
+					model: `${assistantMessage.provider}/${assistantMessage.model}`,
+					maxRetries: INCOMPLETE_RECOVERY_MAX_RETRIES,
+				});
+				this.#host.emitNotice("error", notice, "compaction");
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			}
+
 			// Same active-context vs persisted-history split as the overflow path
 			// above: clear the dead turn from agent state so it cannot be replayed,
 			// but keep it on the branch unless promotion or compaction actually runs.
@@ -2031,6 +2097,7 @@ export class SessionMaintenance {
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				await this.#recordIncompleteRecoveryRetry(undefined);
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
@@ -2048,10 +2115,23 @@ export class SessionMaintenance {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
 				});
-				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
+				const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+				const result = await this.#host.runRecoveryCompactionWithRollback(
+					"incomplete",
+					assistantMessage,
+					allowDefer,
+					{
+						autoContinue,
+						triggerContextTokens: calculateContextTokens(assistantMessage.usage),
+					},
+				);
+				if (result.continuationScheduled && result.historyRewritten === true) {
+					const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+					await this.#recordIncompleteRecoveryRetry(
+						compactionEntryAfter?.id !== compactionEntryBefore?.id ? compactionEntryAfter : undefined,
+					);
+				}
+				return result;
 			}
 			// Neither promotion nor compaction is available — surface the dead-end so
 			// the user understands why the turn yielded with nothing.
@@ -3615,7 +3695,7 @@ export class SessionMaintenance {
 										kvAlignedBase && modelsAreEqual(candidate, kvAlignedBase.model)
 											? kvAlignedBase.base
 											: undefined,
-									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+									remoteSystemPrompt: this.#host.baseSystemPrompt(),
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),

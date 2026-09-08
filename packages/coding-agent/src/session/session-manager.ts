@@ -40,6 +40,7 @@ import {
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
+	type DeferredResumeEntry,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -2454,6 +2455,70 @@ export class SessionManager {
 		const entry: CustomEntry = { type: "custom", customType, data, ...this.#freshEntryFields() };
 		this.#recordEntry(entry);
 		return entry.id;
+	}
+
+	/**
+	 * Append a deferred resume entry that schedules automatic agent
+	 * continuation when a provider usage-limit wait expires.
+	 */
+	appendDeferredResume(entry: DeferredResumeEntry): string {
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/** Find the current active deferred resume entry, if any. */
+	findDeferredResume(): DeferredResumeEntry | null {
+		for (let i = this.#entries.length - 1; i >= 0; i--) {
+			const entry = this.#entries[i];
+			if (entry.type === "deferred_resume") {
+				return entry;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Atomically consume a deferred resume entry by replacing it with a
+	 * consumed marker. Returns true if a deferred entry was found and consumed.
+	 */
+	async consumeDeferredResume(): Promise<boolean> {
+		for (let i = this.#entries.length - 1; i >= 0; i--) {
+			const entry = this.#entries[i];
+			if (entry.type === "deferred_resume") {
+				this.#entries[i] = {
+					...entry,
+					consumed: true,
+				} as DeferredResumeEntry;
+				await this.rewriteEntries();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Cancel a pending deferred resume entry. */
+	async cancelDeferredResume(): Promise<void> {
+		for (let i = this.#entries.length - 1; i >= 0; i--) {
+			const entry = this.#entries[i];
+			if (entry.type === "deferred_resume" && !("consumed" in entry)) {
+				this.#entries.splice(i, 1);
+				await this.rewriteEntries();
+				return;
+			}
+		}
+	}
+
+	/** Get the current session generation counter. */
+	getSessionGeneration(): number | undefined {
+		return this.#header?.generation;
+	}
+
+	/** Increment the session generation (on user interaction). */
+	async incrementSessionGeneration(): Promise<void> {
+		if (!this.#header) return;
+		const current = this.#header.generation ?? 0;
+		this.#header.generation = current + 1;
+		await this.rewriteEntries();
 	}
 
 	/**

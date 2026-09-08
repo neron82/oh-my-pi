@@ -5961,6 +5961,8 @@ export class AgentSession {
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
 		const submittedAt = Date.now();
+		// Invalidate any pending deferred resume on user interaction
+		await this.invalidateDeferredResume();
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
 		// would neither persist nor forward its events and could race the in-flight
@@ -9694,6 +9696,25 @@ export class AgentSession {
 	 */
 	resumeAfterAskReanswer(): void {
 		this.#scheduleAgentContinue({ source: "ask-reanswer" });
+	}
+
+	/**
+	 * Schedule an agent continuation from external callers (e.g., deferred
+	 * resume manager). Wraps the internal scheduler with generation tracking.
+	 */
+	scheduleAgentContinue(source: string, generation?: number): void {
+		this.#scheduleAgentContinue({ source, generation });
+	}
+
+	/**
+	 * Invalidate any pending deferred resume for this session. Called on user
+	 * interaction (new prompt, model change, manual retry) to prevent stale
+	 * automatic resumes. Increments the session generation and cancels the
+	 * deferred entry.
+	 */
+	async invalidateDeferredResume(): Promise<void> {
+		await this.sessionManager.incrementSessionGeneration();
+		await this.sessionManager.cancelDeferredResume();
 	}
 
 	/**

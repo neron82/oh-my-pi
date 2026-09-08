@@ -921,9 +921,6 @@ async function main(): Promise<void> {
 			console.log(
 				`\nUp to date: ${resolved.remote}/${resolved.ref} has no commits beyond ${branch}. Nothing to integrate.`,
 			);
-			if (!flags.dryRun) {
-				return;
-			}
 		}
 		const watch = await watchList(
 			repoRoot,
@@ -938,77 +935,79 @@ async function main(): Promise<void> {
 			console.log("\n(dry run: no branches, refs, or files were changed; fetch updated remote refs only)");
 			return;
 		}
-		if (plan.newCount === 0) {
-			return;
-		}
+		if (plan.newCount > 0) {
+			base = plan.base;
 
-		base = plan.base;
+			// git rerere: recurrences of a conflict resolve from the recorded
+			// previous resolution instead of blocking the pipeline again.
+			await gitChecked(repoRoot, ["config", "rerere.enabled", "true"], { verbose: flags.verbose });
+			await gitChecked(repoRoot, ["config", "rerere.autoUpdate", "true"], { verbose: flags.verbose });
 
-		// git rerere: recurrences of a conflict resolve from the recorded
-		// previous resolution instead of blocking the pipeline again.
-		await gitChecked(repoRoot, ["config", "rerere.enabled", "true"], { verbose: flags.verbose });
-		await gitChecked(repoRoot, ["config", "rerere.autoUpdate", "true"], { verbose: flags.verbose });
+			const dirty =
+				(await gitChecked(repoRoot, ["status", "--porcelain"], { verbose: flags.verbose })).trim().length > 0;
+			let stashed = false;
+			if (dirty) {
+				if (flags.noStash) {
+					throw new Error(
+						"Working tree is dirty and --no-stash was passed. Commit or stash your changes first, or drop --no-stash to auto-stash WIP around the merge.",
+					);
+				}
+				await gitChecked(
+					repoRoot,
+					["stash", "push", "--include-untracked", "-m", "integrate-upstream: pre-merge WIP"],
+					{
+						verbose: flags.verbose,
+					},
+				);
+				stashed = true;
+				console.log("==> Stashed working tree WIP around the merge (auto-stash; popped back after)");
+			}
 
-		const dirty =
-			(await gitChecked(repoRoot, ["status", "--porcelain"], { verbose: flags.verbose })).trim().length > 0;
-		let stashed = false;
-		if (dirty) {
-			if (flags.noStash) {
+			const outcome = await runMerge(repoRoot, upstreamRef, plan.message, manifest, flags.autoOther, flags.verbose);
+
+			if (outcome.aborted) {
+				if (stashed) {
+					await gitChecked(repoRoot, ["stash", "pop"], { verbose: flags.verbose });
+				}
 				throw new Error(
-					"Working tree is dirty and --no-stash was passed. Commit or stash your changes first, or drop --no-stash to auto-stash WIP around the merge.",
+					`Merge aborted; no changes were made. Manual resolution required for:\n${outcome.abortedPaths.map(pathName => `  ${pathName}`).join("\n")}\n` +
+						`Resolve them with git mergetool (rerere is enabled and will remember the resolution), then run:\n` +
+						`  git commit          # complete the merge\n` +
+						`  bun scripts/integrate-upstream.ts --no-fetch --no-merge\n` +
+						`Alternatively rerun with --auto-other=ours|theirs to resolve them on one side automatically.`,
 				);
 			}
-			await gitChecked(repoRoot, ["stash", "push", "-m", "integrate-upstream: pre-merge WIP"], {
-				verbose: flags.verbose,
-			});
-			stashed = true;
-			console.log("==> Stashed working tree WIP around the merge (auto-stash; popped back after)");
-		}
 
-		const outcome = await runMerge(repoRoot, upstreamRef, plan.message, manifest, flags.autoOther, flags.verbose);
-
-		if (outcome.aborted) {
+			mergeSha = outcome.mergeSha;
 			if (stashed) {
-				await gitChecked(repoRoot, ["stash", "pop"], { verbose: flags.verbose });
+				const pop = await runGit(repoRoot, ["stash", "pop"], { verbose: flags.verbose });
+				if (pop.exitCode !== 0) {
+					throw new Error(
+						`Merge succeeded but restoring your stashed WIP conflicted:\n${pop.stderr.trim()}\n` +
+							`Resolve the stash conflict in the worktree and finish with: git stash drop`,
+					);
+				}
+				console.log("==> Restored stashed WIP");
 			}
-			throw new Error(
-				`Merge aborted; no changes were made. Manual resolution required for:\n${outcome.abortedPaths.map(pathName => `  ${pathName}`).join("\n")}\n` +
-					`Resolve them with git mergetool (rerere is enabled and will remember the resolution), then run:\n` +
-					`  git commit          # complete the merge\n` +
-					`  bun scripts/integrate-upstream.ts --no-fetch --no-merge\n` +
-					`Alternatively rerun with --auto-other=ours|theirs to resolve them on one side automatically.`,
+
+			console.log(`\n==> Integrated: ${plan.message}`);
+			console.log(`    merge commit: ${mergeSha?.slice(0, 12) ?? "?"}`);
+			if (outcome.forkResolved.length > 0) {
+				console.log(`    kept fork version on conflict: ${outcome.forkResolved.join(", ")}`);
+			}
+			if (outcome.otherResolved.length > 0) {
+				console.log(`    auto-resolved on one side: ${outcome.otherResolved.join(", ")}`);
+			}
+			if (watch.size > 0) {
+				console.log("    recheck these protected paths against the merged upstream commits:");
+				for (const [pathName, commits] of watch) {
+					console.log(`      ${pathName} (${commits.length} upstream commit${commits.length > 1 ? "s" : ""})`);
+				}
+			}
+			summary.push(
+				`integrated ${plan.base.slice(0, 8)}..${plan.head.slice(0, 8)} (${plan.newCount} commits) as ${mergeSha?.slice(0, 12) ?? "?"}`,
 			);
 		}
-
-		mergeSha = outcome.mergeSha;
-		if (stashed) {
-			const pop = await runGit(repoRoot, ["stash", "pop"], { verbose: flags.verbose });
-			if (pop.exitCode !== 0) {
-				throw new Error(
-					`Merge succeeded but restoring your stashed WIP conflicted:\n${pop.stderr.trim()}\n` +
-						`Resolve the stash conflict in the worktree and finish with: git stash drop`,
-				);
-			}
-			console.log("==> Restored stashed WIP");
-		}
-
-		console.log(`\n==> Integrated: ${plan.message}`);
-		console.log(`    merge commit: ${mergeSha?.slice(0, 12) ?? "?"}`);
-		if (outcome.forkResolved.length > 0) {
-			console.log(`    kept fork version on conflict: ${outcome.forkResolved.join(", ")}`);
-		}
-		if (outcome.otherResolved.length > 0) {
-			console.log(`    auto-resolved on one side: ${outcome.otherResolved.join(", ")}`);
-		}
-		if (watch.size > 0) {
-			console.log("    recheck these protected paths against the merged upstream commits:");
-			for (const [pathName, commits] of watch) {
-				console.log(`      ${pathName} (${commits.length} upstream commit${commits.length > 1 ? "s" : ""})`);
-			}
-		}
-		summary.push(
-			`integrated ${plan.base.slice(0, 8)}..${plan.head.slice(0, 8)} (${plan.newCount} commits) as ${mergeSha?.slice(0, 12) ?? "?"}`,
-		);
 	}
 
 	if (!flags.noCheck) {

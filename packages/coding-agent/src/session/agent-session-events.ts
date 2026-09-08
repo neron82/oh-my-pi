@@ -64,7 +64,15 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| {
+			type: "deferred_resume_scheduled";
+			resumeAt: number;
+			errorMessage: string;
+			reason: string;
+	  }
+	| { type: "deferred_resume_cancelled"; reason: string }
+	| { type: "deferred_resume_completed" };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

@@ -275,6 +275,9 @@ export class EventController {
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
+			deferred_resume_scheduled: e => this.#handleDeferredResumeScheduled(e),
+			deferred_resume_cancelled: e => this.#handleDeferredResumeCancelled(e),
+			deferred_resume_completed: () => this.#handleDeferredResumeCompleted(),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
@@ -2242,6 +2245,24 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>,
 	): Promise<void> {
 		this.ctx.showStatus(`Fallback succeeded on ${event.model}`);
+	}
+
+	async #handleDeferredResumeScheduled(
+		event: Extract<AgentSessionEvent, { type: "deferred_resume_scheduled" }>,
+	): Promise<void> {
+		const resumeTime = new Date(event.resumeAt);
+		const timeStr = resumeTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+		this.ctx.showWarning(`Paused: provider usage limit reached. Auto-resume at ${timeStr}`);
+	}
+
+	async #handleDeferredResumeCancelled(
+		_event: Extract<AgentSessionEvent, { type: "deferred_resume_cancelled" }>,
+	): Promise<void> {
+		this.ctx.showStatus("Auto-resume cancelled by user interaction");
+	}
+
+	async #handleDeferredResumeCompleted(): Promise<void> {
+		this.ctx.showStatus("Resumed from deferred state");
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {

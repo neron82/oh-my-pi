@@ -51,6 +51,11 @@ export interface SessionHeader {
 	previousSessionFiles?: string[];
 	/** Provider prompt-cache identity inherited by exact-route full forks. */
 	providerPromptCacheKey?: string;
+	/**
+	 * Monotonically increasing generation counter incremented on user
+	 * interaction. Used to invalidate stale deferred resume jobs.
+	 */
+	generation?: number;
 }
 
 export interface NewSessionOptions {
@@ -200,6 +205,7 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
 		modelUsage: ModelUsageEntry;
+		deferredResume: DeferredResumeEntry;
 	}
 }
 
@@ -268,6 +274,23 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+/** Deferred resume entry - schedules automatic resume when provider wait expires. */
+export interface DeferredResumeEntry extends SessionEntryBase {
+	type: "deferred_resume";
+	/** Absolute timestamp when the run should resume (milliseconds). */
+	resume_at: number;
+	/** Session generation at time of deferral; mismatch means stale resume. */
+	generation: number;
+	/** Error message explaining why the run was deferred. */
+	error_message: string;
+	/** Provider/model identifier for resume validation. */
+	model: string;
+	/** Reason code for the deferral (e.g., "usage_limit_reached"). */
+	reason: string;
+	/** True if this deferred resume has been consumed (resumed or cancelled). */
+	consumed?: boolean;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -307,7 +330,8 @@ export type SessionEntry =
 	| SessionInitEntry
 	| ModeChangeEntry
 	| CredentialPinEntry
-	| ResetBoundaryEntry;
+	| ResetBoundaryEntry
+	| DeferredResumeEntry;
 
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;

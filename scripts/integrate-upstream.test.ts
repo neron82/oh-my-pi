@@ -377,7 +377,7 @@ describe("integrate-upstream", () => {
 		expect(await headSubject(fixture)).toBe("Merge tag 'v99.0.0' into prompt-cache-stability");
 	});
 
-	test("exits 0 without merging when upstream has nothing new", async () => {
+	test("runs the remaining workflow when upstream has nothing new", async () => {
 		const fixture = await makeFixture({ upstreamCommits: "none" });
 		const result = await runScript(fixture);
 
@@ -388,6 +388,9 @@ describe("integrate-upstream", () => {
 			await new Response((await Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: fixture.work, env })).stdout).text()
 		).trim();
 		expect(headAfter).toBe(fixture.headBefore);
+		expect(await bareSubject(fixture.forkSim, "refs/heads/prompt-cache-stability", env)).toBe(
+			"fork: stability changes",
+		);
 	});
 
 	test("auto-stashes a dirty worktree around the merge and restores the WIP", async () => {
@@ -398,6 +401,17 @@ describe("integrate-upstream", () => {
 		expect(integrated.exitCode).toBe(0);
 		expect(await headSubject(fixture)).toMatch(/^Merge upstream main/);
 		expect(await fileText(fixture, "lib/shared.ts")).toContain("export const wip = true;");
+	});
+
+	test("auto-stashes and restores untracked WIP around the merge", async () => {
+		const fixture = await makeFixture({ upstreamCommits: "regular" });
+		await fs.writeFile(path.join(fixture.work, "update.sh"), "bun scripts/integrate-upstream.ts\n");
+
+		const integrated = await runScript(fixture);
+
+		expect(integrated.exitCode).toBe(0);
+		expect(await headSubject(fixture)).toMatch(/^Merge upstream main/);
+		expect(await fileText(fixture, "update.sh")).toBe("bun scripts/integrate-upstream.ts\n");
 	});
 
 	test("--no-stash refuses a dirty worktree", async () => {

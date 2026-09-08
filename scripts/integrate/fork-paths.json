@@ -49,7 +49,14 @@
 		"packages/coding-agent/test/session/advisor-stability.test.ts",
 		"packages/coding-agent/test/session/llm-request-dump-sidecar.test.ts",
 		"packages/coding-agent/test/session/session-dump-format.test.ts",
-		"packages/coding-agent/test/status-line-usage-line.test.ts"
+		"packages/coding-agent/test/status-line-usage-line.test.ts",
+		"packages/coding-agent/src/session/deferred-run-manager.ts",
+		"packages/coding-agent/src/session/session-entries.ts",
+		"packages/coding-agent/src/session/session-manager.ts",
+		"packages/coding-agent/src/session/turn-recovery.ts",
+		"packages/coding-agent/src/session/agent-session-events.ts",
+		"packages/coding-agent/src/modes/controllers/event-controller.ts",
+		"packages/coding-agent/test/session/deferred-resume.test.ts"
 	],
 	"requiresManualReview": [
 		"packages/coding-agent/CHANGELOG.md"
@@ -68,6 +75,7 @@
 		"packages/coding-agent/test/session/advisor-stability.test.ts",
 		"packages/coding-agent/test/session/llm-request-dump-sidecar.test.ts",
 		"packages/coding-agent/test/session/session-dump-format.test.ts",
-		"packages/coding-agent/test/status-line-usage-line.test.ts"
+		"packages/coding-agent/test/status-line-usage-line.test.ts",
+		"packages/coding-agent/test/session/deferred-resume.test.ts"
 	]
 }

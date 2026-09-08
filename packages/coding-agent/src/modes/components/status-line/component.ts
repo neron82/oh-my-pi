@@ -1758,6 +1758,7 @@ export class StatusLineComponent implements Component {
 		includeGit: boolean,
 		includePr: boolean,
 		previewTitle?: string,
+		startupPlaceholder = false,
 	): SegmentContext {
 		const state = this.session.state;
 
@@ -1813,6 +1814,7 @@ export class StatusLineComponent implements Component {
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
+			startupPlaceholder,
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
@@ -1913,6 +1915,7 @@ export class StatusLineComponent implements Component {
 		width: number,
 		layout: "box" | "band" | "plain-full" | "plain-left" | "plain-right" = "box",
 		previewTitle?: string,
+		startupPlaceholder = false,
 	): string {
 		const effectiveSettings = this.#resolveSettings();
 		const plain = layout !== "box" && layout !== "band";
@@ -1931,6 +1934,7 @@ export class StatusLineComponent implements Component {
 			includeGit,
 			includePr,
 			previewTitle,
+			startupPlaceholder,
 		);
 		// Second row under the bar: live tok/s, provider-reported cache-hit
 		// rate, and cumulative session input/output — all measured usage.
@@ -2386,6 +2390,17 @@ export class StatusLineComponent implements Component {
 		return this.#dimWhileFocusProxied(
 			this.#buildStatusLine(width, groups === "left" ? "plain-left" : "plain-full", previewTitle),
 		);
+	}
+	/**
+	 * Placeholder-only status chrome for speculative first-frame replay. It
+	 * follows the live layout pipeline while each segment masks session-derived
+	 * values, preserving its iconography and color treatment.
+	 */
+	renderStartupPlaceholder(
+		width: number,
+		layout: "box" | "band" | "plain-full" | "plain-left" | "plain-right",
+	): string {
+		return this.#dimWhileFocusProxied(this.#buildStatusLine(width, layout, undefined, true));
 	}
 	/**
 	 * Status bar lines for a composer layout, rendered through the real
