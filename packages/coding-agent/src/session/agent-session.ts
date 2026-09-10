@@ -1433,7 +1433,13 @@ export class AgentSession {
 			consumeDeferredResume: async () => this.sessionManager.consumeDeferredResume(),
 			cancelDeferredResume: async () => this.sessionManager.cancelDeferredResume(),
 			resumeSession: () => {
-				this.#scheduleAgentContinue({ source: "deferred-resume" });
+				// The tail of a usage-limit-failed turn is an assistant error
+				// message, and agent.continue() rejects that role — the resume
+				// died silently after the entry was consumed. Inject the
+				// auto-continue prompt instead: a synthetic turn the provider
+				// accepts from any tail, the same continuation goal mode uses.
+				this.#scheduleAutoContinuePrompt(this.#promptGeneration);
+				void this.#emitSessionEvent({ type: "deferred_resume_completed" });
 			},
 		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {

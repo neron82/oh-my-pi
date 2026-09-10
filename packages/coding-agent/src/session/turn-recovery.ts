@@ -258,6 +258,7 @@ type UsageLimitOutcome = {
 	priorBlockedUntilMs: number | undefined;
 	priorBlockedUntilTimed: boolean | undefined;
 	reportResetAtMs: number | undefined;
+	statedResetAtMs: number | undefined;
 };
 
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
@@ -634,6 +635,7 @@ export class TurnRecovery {
 					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
 					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
 					reportResetAtMs: outcome.reportResetAtMs,
+					statedResetAtMs: outcome.statedResetAtMs,
 				};
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
@@ -2435,8 +2437,15 @@ export class TurnRecovery {
 			// Check if this is a usage-limit error with provider-stated timing that qualifies
 			// for durable deferred resume instead of failing.
 			const isUsageLimit = AIError.is(id, AIError.Flag.UsageLimit);
+			// Provider-stated timing: the error-text hint, a complete report,
+			// or a partial report whose known window boundary already merged
+			// into the credential block (statedResetAtMs). The partial case
+			// may re-error at resume time — the deferred path re-arms then —
+			// but a purely heuristic wait must never park a run.
 			const hasProviderTiming =
-				parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome?.reportResetAtMs !== undefined;
+				parsedRetryAfterMs !== undefined ||
+				recordedUsageLimitOutcome?.reportResetAtMs !== undefined ||
+				recordedUsageLimitOutcome?.statedResetAtMs !== undefined;
 
 			if (isUsageLimit && hasProviderTiming) {
 				// Create deferred resume entry

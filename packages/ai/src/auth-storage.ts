@@ -783,6 +783,12 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * reset, so sleeping until the latest one can actually clear the account. A
  * permanent cap alongside a timed window (or no report at all) leaves it
  * unset, and the heuristic fallback alone must never authorize a wait.
+ * `statedResetAtMs` (epoch ms) is present whenever ANY exhausted window
+ * carries a future reset — the provider-stated unblock time for the windows
+ * that report one, even when others (e.g. a weekly cap with no reported
+ * reset) leave the report incomplete. It qualifies a run for durable deferred
+ * resume, which re-arms on a renewed limit; it never replaces the in-request
+ * wait, where only the complete report may override the heuristic.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
@@ -791,6 +797,7 @@ export interface UsageLimitMarkResult {
 	priorBlockedUntilMs?: number;
 	priorBlockedUntilTimed?: boolean;
 	reportResetAtMs?: number;
+	statedResetAtMs?: number;
 }
 
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
@@ -4830,6 +4837,9 @@ export class AuthStorage {
 		// independently of whether the report extends the hint so a shorter
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
+		// Provider-stated reset for at least one exhausted window (partial
+		// authority): every window with a known reset contributes its boundary.
+		let statedResetAtMs: number | undefined;
 		if (target && routing.strategy) {
 			const report = await raceUsageWithSignal(
 				this.#getUsageReport(provider, target.credential, options),
@@ -4839,6 +4849,7 @@ export class AuthStorage {
 				const scopedLimits = this.#getScopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (this.#isUsageLimitReached(scopedLimits)) {
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
+					statedResetAtMs = resetAtMs;
 					if (resetAtMs && resetAtMs > blockedUntil) {
 						blockedUntil = resetAtMs;
 						providerTimed = true;
@@ -4869,7 +4880,8 @@ export class AuthStorage {
 			routing,
 			providerTimed,
 		);
-		return reportResetAtMs === undefined ? rotation : { ...rotation, reportResetAtMs };
+		const stated = statedResetAtMs === undefined ? rotation : { ...rotation, statedResetAtMs };
+		return reportResetAtMs === undefined ? stated : { ...stated, reportResetAtMs };
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
