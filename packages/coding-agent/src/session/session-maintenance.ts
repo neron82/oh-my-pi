@@ -286,6 +286,9 @@ export interface SessionMaintenanceHost {
 	goalModeState(): GoalModeState | undefined;
 	planReferencePath(): string;
 	nonMessageTokenSource(): NonMessageTokenSource;
+	hasExperimentalContextRolloverTools(): boolean;
+	takeExperimentalContextRolloverRequest(context: AgentTurnEndContext | undefined): boolean;
+	queueExperimentalContextNotesReminder(prompt: string): void;
 	memoryBackendSession(): MemoryBackendOperationContext["session"];
 	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
