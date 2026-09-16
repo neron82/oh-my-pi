@@ -1298,6 +1298,72 @@ export class SessionMaintenance {
 		return this.#manualCompactionCleanup;
 	}
 
+	/*
+	 * Upstream v18.2.2 surface, adapted to this fork's resume model.
+	 *
+	 * Upstream arbitrates a withheld "interrupted-turn resume" against prompts
+	 * parked on the compaction barrier with an in-memory claim counter
+	 * (`#promptsAwaitingCleanup` + `#deferredResumeGeneration`). This fork
+	 * schedules such resumes as durable deferred runs (DeferredRunManager,
+	 * discarded on a generation/user-action mismatch), so there is no in-memory
+	 * decision to claim here: the barrier is the whole contract, and the caller
+	 * dispatches normally once it resolves.
+	 */
+
+	/**
+	 * Park an ordinary prompt until an in-flight manual compaction has
+	 * reconnected the agent subscription and re-drained its preserved queues.
+	 * `undefined` when nothing is in flight, the caller dispatches immediately.
+	 */
+	async waitForManualCompactionCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
+		const cleanup = this.#manualCompactionCleanup;
+		if (!cleanup) return undefined;
+		await cleanup;
+		// Release token is a no-op: no claim bookkeeping exists in this fork.
+		return () => {};
+	}
+
+	/** No claim to hand out — deferred resumes here guard themselves (see above). */
+	claimPendingResume(): ((startedTurn: boolean) => void) | undefined {
+		return undefined;
+	}
+
+	/**
+	 * A turn started, by whatever path (a released prompt, an extension's
+	 * `sendMessage({ triggerTurn })`, the queued-message drain). Upstream clears
+	 * its withheld resume here; this fork's deferred runs are discarded by their
+	 * own mismatch guard instead, so there is nothing to clear.
+	 */
+	noteTurnStarted(): void {}
+
+	/**
+	 * Shrink the live request before retrying it after the engine timed out
+	 * reading the request body.
+	 *
+	 * Faithful to upstream except for the switches this fork's `shake()` does not
+	 * have: upstream also passes `toolResultsOnly` (only tool results may go) and
+	 * `isCurrent`; here the elide pass may touch any shake region, `isCurrent` is
+	 * enforced by the checks below, and upstream's `requireArtifact` is enforced
+	 * explicitly — nothing may be dropped without a persisted original to fall
+	 * back on.
+	 */
+	async shakeForRequestBodyReadTimeout(generation: number): Promise<boolean> {
+		const settings = this.#host.settings.getGroup("compaction");
+		if (!settings.enabled || !resolveCompactionMethodOrder(settings.methodOrder).includes("shake")) return false;
+		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
+		if (!isCurrent()) return false;
+		try {
+			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
+			if (result.artifactId === undefined) return false;
+			return isCurrent() && result.toolResultsDropped + result.blocksDropped > 0;
+		} catch (error) {
+			if (!(error instanceof CompactionCancelledError)) {
+				this.#host.emitNotice("warning", "Could not safely reduce this request before retrying it.", "compaction");
+			}
+			return false;
+		}
+	}
+
 	/** Cancel only automatic maintenance while preserving a manual compaction. */
 	abortAutomaticCompaction(): void {
 		this.#autoCompactionAbortController?.abort();
@@ -4291,12 +4357,25 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Toggle auto-compaction setting.
+	 * `persist` saves the preference durably to the global config and drops any
+	 * session-scoped override; the default applies a session-scoped override so
+	 * transient callers (e.g. the `set_auto_compaction` RPC command) configure
+	 * only their own session instead of mutating the machine-global `config.yml`.
+	 * The settings panel passes `persist: true`.
 	 */
-	setAutoCompactionEnabled(enabled: boolean): void {
-		this.#host.settings.set("compaction.enabled", enabled);
+	setAutoCompactionEnabled(enabled: boolean, persist = false): void {
+		if (persist) {
+			this.#host.settings.set("compaction.enabled", enabled);
+			this.#host.settings.clearOverride("compaction.enabled");
+		} else {
+			this.#host.settings.override("compaction.enabled", enabled);
+		}
 		if (enabled && resolveCompactionMethodOrder(this.#host.settings.get("compaction.methodOrder")).length === 0) {
-			this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			if (persist) {
+				this.#host.settings.set("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			} else {
+				this.#host.settings.override("compaction.methodOrder", [...DEFAULT_COMPACTION_METHOD_ORDER]);
+			}
 		}
 	}
 

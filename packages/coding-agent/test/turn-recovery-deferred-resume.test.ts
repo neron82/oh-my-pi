@@ -82,6 +82,13 @@ function createHost(model: Model, modelRegistry: ModelRegistry, capture: Capture
 		abortInProgress: () => false,
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
+		// Upstream v18.2.2 extended TurnRecoveryHost; these four are required by
+		// the interface and are irrelevant to the deferred-resume gating under
+		// test (the request-body-timeout recovery path is not exercised here).
+		promptSequence: () => 0,
+		resolveActiveEditMode: () => "hashline",
+		syncAfterModelChange: async () => {},
+		shakeForRequestBodyReadTimeout: async () => false,
 		sessionId: () => "test-session",
 		emitSessionEvent: async event => {
 			capture.events.push(event);

@@ -20,14 +20,20 @@ const MESSAGE_DECODER = new TextDecoder("utf-8");
 const DEFAULT_MAX_PENDING_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Upstream v18.2.2 bound: a peer that never terminates a header block is a
+ * protocol violation, not recoverable noise. Exceeding it raises
+ * {@link MessageFramingError} so callers can close the link.
+ */
+const MAX_HEADER_BYTES = 16 * 1024;
+
+/**
  * Protocol violation while framing a JSON-RPC stream.
  *
- * Upstream throws this from its framer; this fork reports overflow through
- * `MessageFramer.overflowed` instead (push becomes a no-op and the caller tears
- * the connection down). The class is kept exported because merged code depends
- * on it — `dap/client.ts` classifies a thrown framing failure with
- * `error instanceof MessageFramingError`. The fork's framer does not throw it
- * today, so that classification stays inert until the two contracts are unified.
+ * Raised when a peer violates the framing contract in a way that cannot be
+ * resynced (an unterminated header block). Overflow of the pending/content
+ * budget still reports through `MessageFramer.overflowed` as well — callers
+ * check the flag, the throw, or both; either signal must tear the transport
+ * down.
  */
 export class MessageFramingError extends Error {
 	constructor(message: string) {
@@ -148,6 +154,17 @@ export class MessageFramer {
 	}
 
 	/**
+	 * Mark the framer overflowed and raise the violation to the caller. Both
+	 * signals are set so callers may poll `overflowed` or catch the error.
+	 */
+	#fail(message: string): never {
+		this.#overflowed = true;
+		this.#pendingChunks.length = 0;
+		this.#pendingLen = 0;
+		throw new MessageFramingError(message);
+	}
+
+	/**
 	 * Yield the JSON text of every complete message currently buffered. A header
 	 * block without a `Content-Length` is non-protocol noise (e.g. a server
 	 * printing to stdout); `onResync` is invoked with the offending header text
@@ -157,7 +174,17 @@ export class MessageFramer {
 	*drain(onResync: (headerText: string) => void): Generator<string> {
 		while (true) {
 			const headerEnd = findHeaderEndInChunks(this.#pendingChunks);
-			if (headerEnd === -1) break;
+			if (headerEnd === -1) {
+				// A peer that never terminates a header block cannot be resynced the
+				// way a bogus-but-terminated header can: raise it. Upstream's merged
+				// callers depend on this throw (the LSP mux closes the link, the DAP
+				// client disposes the adapter); the flag below stays for the callers
+				// that only poll `overflowed`.
+				if (this.#pendingLen >= MAX_HEADER_BYTES) {
+					this.#fail(`JSON-RPC header block exceeds ${MAX_HEADER_BYTES} bytes`);
+				}
+				break;
+			}
 
 			const headerText = MESSAGE_DECODER.decode(copyChunkRange(this.#pendingChunks, 0, headerEnd));
 			const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);

@@ -653,7 +653,11 @@ export class DapClient {
 		// in-flight request and event waiter so callers see an immediate error
 		// instead of waiting out their own timeout.
 		this.#failConnection(closeError ?? new Error(`DAP connection closed: ${this.adapter.name} transport ended`));
-		if (framingFailed) {
+		// Upstream classifies a thrown framing failure via `framingFailed`; this
+		// fork's framer reports overflow through `framer.overflowed` instead, so
+		// both signals must tear the adapter down — dropping either one leaves
+		// the process alive with an unread pipe (dap-frame-overflow.test.ts).
+		if (framingFailed || framer.overflowed) {
 			await this.dispose().catch(error => {
 				logger.warn("Failed to dispose DAP adapter after invalid framing", {
 					adapter: this.adapter.name,
