@@ -20,6 +20,23 @@ const MESSAGE_DECODER = new TextDecoder("utf-8");
 const DEFAULT_MAX_PENDING_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Protocol violation while framing a JSON-RPC stream.
+ *
+ * Upstream throws this from its framer; this fork reports overflow through
+ * `MessageFramer.overflowed` instead (push becomes a no-op and the caller tears
+ * the connection down). The class is kept exported because merged code depends
+ * on it — `dap/client.ts` classifies a thrown framing failure with
+ * `error instanceof MessageFramingError`. The fork's framer does not throw it
+ * today, so that classification stays inert until the two contracts are unified.
+ */
+export class MessageFramingError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "MessageFramingError";
+	}
+}
+
+/**
  * Locate the `\r\n\r\n` header terminator across the pending chunk list.
  * Returns the absolute byte index of the first `\r`, or -1 when not present.
  * Equivalent to scanning the contiguous concatenation of the chunks.
