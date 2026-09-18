@@ -12,9 +12,13 @@ Doing that by hand every release is exactly the kind of step that gets
 forgotten or done inconsistently. This pipeline turns it into one command:
 
 ```sh
-bun scripts/integrate-upstream.ts            # full pipeline
+./update.sh                                  # full pipeline
 bun scripts/integrate-upstream.ts --dry-run  # preview first (no changes)
 ```
+
+`update.sh` is a thin wrapper around the script and passes its arguments
+through, so `./update.sh --dry-run`, `./update.sh --no-build --no-deploy`, and
+the recovery form `./update.sh --no-fetch --no-merge` all work.
 
 ## The one-command flow
 
@@ -27,12 +31,16 @@ The script runs the following stages, in order; each can be skipped:
    prompt-cache-stability` when the range contains a new release tag), and —
    critically — the **watch list**: every upstream commit in the range that
    touched a fork-protected path.
-3. **Merge** — merges upstream `main` with `--no-ff`. Conflicts on
-   **protected paths** are automatically resolved in favor of the fork
-   version (`forkWinsOnConflict` in the manifest), because those files carry
-   the prompt-cache stability adaptations and cannot adopt upstream's
-   conflicting hunks wholesale. Conflicts anywhere else abort the merge and
-   roll everything back, telling you exactly which files need a human.
+3. **Merge** — merges upstream `main` with `--no-ff`. A conflict on a
+   **protected path** (`forkWinsOnConflict` in the manifest) is resolved
+   **region by region**: each conflicting region takes the fork side, while
+   everything git already auto-merged around it — every upstream hunk that did
+   not overlap a fork edit — is kept byte-for-byte. Conflicts anywhere else
+   abort the merge and roll everything back, telling you exactly which files
+   need a human (and why). A protected path upstream *renamed* is protected at
+   its new location, and a protected path upstream *deleted* stops the merge
+   instead of being resurrected — keeping it would leave a second copy of code
+   upstream has moved on from.
    `git rerere` is enabled, so a conflict you resolve by hand once is
    remembered and auto-resolved on the next integration.
 4. **Check** — re-installs dependencies when the merge changed any
@@ -77,6 +85,12 @@ The pipeline now handles that automatically:
   still lacks the sentinel. If the rebuild regenerates tracked bindings
   (`native/index.js` / `native/index.d.ts`) differently from the merged tree,
   it prints a reminder to commit them.
+- **Sibling variants**: `embed-native.ts` embeds *every* x64 addon present in
+  that directory and refuses the build when one lacks the current sentinel.
+  A `-baseline` addon left over from an older release (this host builds only
+  its own variant) would therefore block every build after a version bump, so
+  the build stage quarantines a stale sibling as `<name>.stale` and prints the
+  bazel target needed to regenerate it.
 - **Deploy stage** removes `~/.omp/natives/<version>` before the smoke test,
   so the smoke run extracts and exercises the new binary's own embedded
   addon instead of a cached leftover from an earlier build of the same
@@ -93,7 +107,7 @@ the fork owns:
 | `integrationBranch` | Branch the fork lives on (`prompt-cache-stability`). |
 | `pushRemote` | GitHub remote the result is pushed to (`fork`). |
 | `deployDir` | Default binary install dir (`${HOME}/.local/bin`). |
-| `forkWinsOnConflict` | Paths that keep the fork version when the merge conflicts. |
+| `forkWinsOnConflict` | Paths that keep the fork side of a conflicting region when the merge conflicts; protection follows upstream renames (see below). |
 | `requiresManualReview` | Paths that abort the merge on conflict (currently the changelog, where dropping either side is wrong). |
 | `tests` | The fork's stability test suite run after every merge. |
 
@@ -106,23 +120,40 @@ bun scripts/integrate-upstream.ts --sync-manifest
 
 It diffs the committed fork state against upstream and adds/removes manifest
 entries (paths you have deliberately moved to `requiresManualReview` are
-preserved). The manifest also regenerates with `--no-fetch` when you want it
-to reflect the last fetched upstream.
+preserved). Rename detection is on, so a fork file upstream has moved is
+recorded at its *current* path — the location the next merge must protect. The
+manifest also regenerates with `--no-fetch` when you want it to reflect the
+last fetched upstream.
 
 ### Conflict policy, precisely
 
-- A path in `forkWinsOnConflict` that conflicts → the fork version wins, a
-  line appears in the run output, and the merging script's **watch list**
-  tells you which upstream commits touched it so you can re-check whether the
-  fork adaptation still covers the new upstream behavior.
+- A path in `forkWinsOnConflict` that conflicts → **each conflict region**
+  takes the fork side. Upstream's non-conflicting changes in the same file are
+  kept, because the resolution never rewrites the auto-merged content around
+  the conflict markers (`git checkout --ours -- <path>`, by contrast, replaces
+  the whole file with the fork's pre-merge copy and silently drops them). The
+  run lists every resolved path with its number of conflicting regions, and
+  the **watch list** names the upstream commits that touched it so you can
+  re-check whether the fork adaptation still covers the new upstream behavior.
+- A protected path upstream **renamed** → protection follows the rename. git
+  usually pairs the content itself (the fork edits land at the new path, and a
+  conflicting region there is where the reset of the file's content does too);
+  the successor is protected automatically, including the relocated copy of a
+  fork-only file that lived in a renamed directory.
+- A protected path upstream **deleted or failed to pair with its rename** →
+  the pipeline stops and names the likely new home, rather than keeping the
+  old file (which would leave a second, dead copy of the fork's edit next to
+  upstream's replacement). Port the fork change to the new home, or pass
+  `--auto-other=ours|theirs` to decide explicitly.
 - A path in `requiresManualReview` that conflicts → pipeline stops. Resolve
   with `git mergetool`, `git commit`, and re-run with
   `--no-fetch --no-merge`. rerere remembers the resolution for next time.
 - Any other conflicted path → pipeline stops (same rollback). Pass
   `--auto-other=ours|theirs` to force every remaining conflict — including
   the `requiresManualReview` paths — to resolve on one side without stopping.
-  Useful for unattended runs, at the cost of silently dropping one side's
-  changes.
+  Useful for unattended runs, at the cost of dropping one side's changes.
+- Binary conflicts and delete/modify cases with no textual regions to choose
+  from stop the merge: they need a human decision, not a side.
 
 ## Push destination
 
@@ -179,10 +210,28 @@ machine, since the deploy stage needs your local build environment.
 Plain `git merge` would put every conflict in front of you and, worse, would
 silently *not* tell you when upstream rewrote a file the fork had adapted.
 The pipeline inverts that: the files the fork owns are known (manifest),
-conflicts there follow the fork's policy automatically, and every upstream
-commit that touched them is surfaced in the run output so the re-check that
-used to be a manual chore is now a printed checklist. The type-check and the
-fork's test suite then prove the kept code still works against the new
-upstream APIs — the same reconciliation the fork already does by hand in
-commits like *"reconcile KV-aligned compaction with the 17.4 tokenizer budget
-API"*.
+conflicts there follow the fork's policy automatically — at region
+granularity, so upstream's work in those same files still lands — and every
+upstream commit that touched them is surfaced in the run output so the
+re-check that used to be a manual chore is now a printed checklist. The
+type-check and the fork's test suite then prove the kept code still works
+against the new upstream APIs — the same reconciliation the fork already does
+by hand in commits like *"reconcile KV-aligned compaction with the 17.4
+tokenizer budget API"*.
+
+That region granularity is not cosmetic. Resolving a whole file to the fork's
+copy (`git checkout --ours -- <path>`) also reverts every upstream hunk the
+merge had already accepted into it: `session-maintenance.ts` drifted ~1.1k
+lines behind upstream across a handful of releases that way, while each
+individual merge looked like a one-file conflict. Keeping the auto-merged
+content is what makes repeated integrations cheap instead of cumulative.
+
+Upstream relocations are the other half. The v18.2.6 integration stopped on
+`packages/tui/src/status-line/*` because upstream migrated the renderers into
+`@oh-my-pi/pi-tui`: the manifest listed the old
+`packages/coding-agent/src/modes/components/status-line/*` paths, and a
+path-list policy without rename detection cannot express "the file this entry
+protects now lives over there". Protection now follows the rename, the
+manifest regenerates rename-aware, and a protected path that upstream deleted
+outright stops the run with the likely new home named instead of silently
+resurrecting a file the tree no longer imports.
