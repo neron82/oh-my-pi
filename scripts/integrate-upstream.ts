@@ -941,7 +941,9 @@ async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<vo
 		)
 			continue;
 		if (await addonExposesSentinel(sibling, sentinel)) continue;
-		const quarantined = `${sibling}.stale`;
+		const quarantined = sibling.endsWith(".node")
+			? `${sibling.slice(0, -".node".length)}.stale.node`
+			: `${sibling}.stale`;
 		await fs.rm(quarantined, { force: true });
 		await fs.rename(sibling, quarantined);
 		console.log(

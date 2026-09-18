@@ -89,7 +89,7 @@ The pipeline now handles that automatically:
   that directory and refuses the build when one lacks the current sentinel.
   A `-baseline` addon left over from an older release (this host builds only
   its own variant) would therefore block every build after a version bump, so
-  the build stage quarantines a stale sibling as `<name>.stale` and prints the
+  the build stage quarantines a stale sibling as `<name>.stale.node` (gitignored) and prints the
   bazel target needed to regenerate it.
 - **Deploy stage** removes `~/.omp/natives/<version>` before the smoke test,
   so the smoke run extracts and exercises the new binary's own embedded
