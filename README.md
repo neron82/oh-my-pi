@@ -1,3 +1,71 @@
+> **Personal fork of [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).**
+> It tracks upstream `main` and adds one thing on top: prompt / KV-cache
+> stability as an enforced invariant. Everything from the horizontal rule down
+> is upstream's README, unchanged. Not affiliated with the upstream project.
+
+## Why this fork exists
+
+Every model request is a fresh prompt, and prefix caches — Anthropic, OpenAI,
+Google, and KV-retaining local engines such as llama.cpp — only pay off when
+the *leading bytes* of that prompt match the previous request. The usual
+failure mode is silent: one reordered tool, one regenerated system prompt, one
+timestamp in the wrong place, and the whole prompt is re-prefilled. You pay
+full price and notice nothing.
+
+This fork makes prefix stability structural instead of accidental, and makes it
+measurable: an invariant with tests, telemetry and a benchmark, rather than a
+hope.
+
+## How it is implemented
+
+- **Append-only execution is the default** (`provider.appendOnlyContext`;
+  `auto` resolves on for every provider): a frozen `StablePrefix` — system
+  prompt plus tool-catalogue snapshot — over an append-only message log, with
+  longest-stable-prefix sync when something is legitimately rewritten.
+- **Per-request data rides the tail.** Date/cwd reminders and steering wrap
+  into identity-memoized tail messages instead of the system prompt, so a new
+  turn never rewrites earlier bytes.
+- **Deterministic ordering.** Tool schemas are memoized and order-preserving
+  (growing the set appends), and skills render in a stable name/source order.
+- **KV-aligned compaction.** Summarization replays the live system prompt, the
+  live tools and the shadowed region verbatim, with the instruction appended
+  as the final user message — a genuine prefix extension of the last request
+  instead of an unrelated text blob.
+- **Observability.** A per-request `PromptStabilityMonitor` report (stable
+  bytes, first divergence, cause) in the debug log, a `prompt-cache` section
+  in the session dump, `pi.gen_ai.prompt_stability.*` span attributes, and a
+  measured usage row under the status bar (`statusLine.usageLine`: live tok/s,
+  provider-reported cache-hit rate, session totals).
+- **Proof.** `packages/coding-agent/scripts/prompt-cache-benchmark.ts` drives a
+  deterministic multi-turn trajectory and reports prefix reuse per request;
+  the test suite asserts consecutive unchanged requests are strict byte-prefix
+  extensions.
+
+The full write-up — adopted ideas, deliberately rejected ones, invariants and
+benchmark numbers — is in
+[docs/prompt-cache-stability.md](docs/prompt-cache-stability.md).
+
+## Staying current with upstream
+
+`./update.sh` is the entire release process: fetch upstream `main`, merge it
+under a protected-path policy (fork-owned files keep the fork side of a
+conflict, region by region, so upstream's other changes in those files still
+land), type-check, run the fork's stability suite and the Rust suite, build the
+binary, smoke-test and install it, then push the result here. The protected
+paths live in
+[`scripts/integrate/fork-paths.json`](scripts/integrate/fork-paths.json); the
+policy, the recovery flow and the CI verification net are documented in
+[docs/integration-pipeline.md](docs/integration-pipeline.md).
+
+Beyond cache stability the fork carries a few smaller hardening changes
+(durable auto-resume after a provider wait limit, teardown of leaking LSP/DAP
+adapters on frame overflow, sanitized MCP result rendering). Those are
+incidental — the stability work is the point.
+
+---
+
+*Everything below is upstream's README, kept as-is.*
+
 <p align="center">
   <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="omp">
 </p>
