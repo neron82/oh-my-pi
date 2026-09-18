@@ -865,8 +865,20 @@ async function addonExposesSentinel(addonPath: string, sentinel: string): Promis
 }
 
 /**
- * Ensure the host native addon under packages/natives/native is built from
- * the current tree. Upstream bumps the sentinel on every release
+ * Addon filenames `embed-native.ts` embeds for this host's platform+arch.
+ * Mirrors its candidate table: x64 embeds both variants when present, every
+ * other arch a single file.
+ */
+function embeddableAddonFilenames(): readonly string[] {
+	const tag = `${process.platform}-${process.arch}`;
+	return process.arch === "x64"
+		? [`pi_natives.${tag}-modern.node`, `pi_natives.${tag}-baseline.node`]
+		: [`pi_natives.${tag}.node`];
+}
+
+/**
+ * Ensure the native addons under packages/natives/native are built from the
+ * current tree. Upstream bumps the sentinel on every release
  * (`packages/natives/package.json#version`), so after an integration the
  * previously embedded `.node` files are stale and would fail the compiled
  * binary's smoke test. Rebuilds through the repo's own host path
@@ -879,41 +891,62 @@ async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<vo
 	const hostFilename = hostAddonFilename();
 	const hostPath = path.join(nativesDir, hostFilename);
 
-	const exists = await fs.stat(hostPath).then(
-		() => true,
-		() => false,
-	);
-	if (exists && (await addonExposesSentinel(hostPath, sentinel))) {
+	if (await addonExposesSentinel(hostPath, sentinel)) {
 		console.log(`\n==> Native addon ${hostFilename} is current (${sentinel}); no rebuild needed`);
-		return;
+	} else {
+		console.log(`\n==> Host native addon missing or stale (expected ${sentinel} in ${hostFilename}); rebuilding`);
+		await runCommandInherit(repoRoot, ["bun", "run", "build:native"], "Rebuild host native addon (cargo/N-API)");
+
+		if (!(await addonExposesSentinel(hostPath, sentinel))) {
+			throw new Error(
+				`Native rebuild finished but ${hostPath} still does not expose ${sentinel}. The rebuild failed or produced the wrong addon, so the compiled binary would fail its smoke test.`,
+			);
+		}
+		console.log(`==> Native addon rebuilt: ${hostFilename} (${sentinel})`);
+
+		const dirtyBindings = (
+			await runGit(
+				repoRoot,
+				[
+					"status",
+					"--porcelain",
+					"--",
+					path.join("packages", "natives", "native", "index.js"),
+					path.join("packages", "natives", "native", "index.d.ts"),
+				],
+				{ verbose },
+			)
+		).stdout.trim();
+		if (dirtyBindings.length > 0) {
+			console.log(
+				"    note: regenerated native bindings differ from the merged tree — `git add packages/natives/native` before pushing.",
+			);
+		}
 	}
 
-	console.log(`\n==> Host native addon missing or stale (expected ${sentinel} in ${hostFilename}); rebuilding`);
-	await runCommandInherit(repoRoot, ["bun", "run", "build:native"], "Rebuild host native addon (cargo/N-API)");
-
-	if (!(await addonExposesSentinel(hostPath, sentinel))) {
-		throw new Error(
-			`Native rebuild finished but ${hostPath} still does not expose ${sentinel}. The rebuild failed or produced the wrong addon, so the compiled binary would fail its smoke test.`,
-		);
-	}
-	console.log(`==> Native addon rebuilt: ${hostFilename} (${sentinel})`);
-
-	const dirtyBindings = (
-		await runGit(
-			repoRoot,
-			[
-				"status",
-				"--porcelain",
-				"--",
-				path.join("packages", "natives", "native", "index.js"),
-				path.join("packages", "natives", "native", "index.d.ts"),
-			],
-			{ verbose },
+	// `bun run build:native` builds this host's variant only, while
+	// packages/natives/scripts/embed-native.ts embeds *every* variant present
+	// in the directory and fails the build when one lacks the current
+	// sentinel. A sibling left over from an older release (a release build on
+	// this machine produced both) would otherwise break every build until
+	// someone deleted it by hand.
+	for (const filename of embeddableAddonFilenames()) {
+		if (filename === hostFilename) continue;
+		const sibling = path.join(nativesDir, filename);
+		if (
+			!(await fs.stat(sibling).then(
+				() => true,
+				() => false,
+			))
 		)
-	).stdout.trim();
-	if (dirtyBindings.length > 0) {
+			continue;
+		if (await addonExposesSentinel(sibling, sentinel)) continue;
+		const quarantined = `${sibling}.stale`;
+		await fs.rm(quarantined, { force: true });
+		await fs.rename(sibling, quarantined);
 		console.log(
-			"    note: regenerated native bindings differ from the merged tree — `git add packages/natives/native` before pushing.",
+			`==> Quarantined stale ${filename} as ${path.basename(quarantined)} (it lacks ${sentinel}, so the embed step would reject it). ` +
+				`This host's local build cannot produce that variant; regenerate it with \`bun scripts/bazel-natives.ts <target>\` when you need it.`,
 		);
 	}
 }
@@ -1313,20 +1346,19 @@ async function main(): Promise<void> {
 
 	if (!flags.noCheck) {
 		// After a manual resolution (`--no-merge`) the merge already happened, so
-		// `base` is unset — compare against the upstream merge base instead of
-		// HEAD-against-itself, otherwise the dependency install and the Rust suite
-		// (both keyed on what changed) silently skip.
+		// `base` is unset. Use the merge commit's first parent — the fork's
+		// pre-merge tip — as the comparison point: `merge-base HEAD upstream`
+		// would collapse to upstream itself once the merge is committed, hiding
+		// every path the merge touched (and silently skipping the dependency
+		// install and the Rust suite, which are keyed on what changed).
 		let checkBase = base;
 		if (checkBase === null) {
-			const upstreamMergeBase = await runGit(
-				repoRoot,
-				["merge-base", "HEAD", `refs/remotes/${resolved.remote}/${resolved.ref}`],
-				{ verbose: flags.verbose },
-			);
-			checkBase =
-				upstreamMergeBase.exitCode === 0 && upstreamMergeBase.stdout.trim().length > 0
-					? upstreamMergeBase.stdout.trim()
-					: (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
+			const parents = (
+				await gitChecked(repoRoot, ["rev-list", "--parents", "-n", "1", "HEAD"], { verbose: flags.verbose })
+			)
+				.trim()
+				.split(" ");
+			checkBase = parents[1] ?? parents[0] ?? "HEAD";
 		}
 		await runChecks(repoRoot, checkBase, manifest, flags.verbose);
 		summary.push("checks passed (type-check + fork stability tests)");
