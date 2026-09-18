@@ -9,6 +9,7 @@
 	"deployDir": "${HOME}/.local/bin",
 	"forkWinsOnConflict": [
 		".github/workflows/fork-verify.yml",
+		"README.md",
 		"docs/compaction.md",
 		"docs/integration-pipeline.md",
 		"docs/prompt-cache-stability.md",
