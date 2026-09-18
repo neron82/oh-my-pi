@@ -1,13 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import {
 	formatCompactTokenCount,
 	formatTokensPerSecond,
 	formatUsageStatLine,
-} from "@oh-my-pi/pi-coding-agent/modes/components/status-line/usage-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+	StatusLineComponent,
+} from "@oh-my-pi/pi-tui/status-line";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -26,13 +27,25 @@ function makeUsageComponent(
 	totals: { input: number; output: number; cacheRead: number; cacheWrite: number },
 	options: { usageLine?: boolean },
 ): StatusLineComponent {
-	const component = new StatusLineComponent({
-		state: {
-			messages: [{ role: "assistant", timestamp: 1, duration: 2_000, usage: { output: 200 } }],
-			model: { id: "deepseek-chat", contextWindow: 100_000, provider: "deepseek" },
-		},
-		model: { id: "deepseek-chat", contextWindow: 100_000, provider: "deepseek" },
+	const messages = [{ role: "assistant", timestamp: 1, duration: 2_000, usage: { output: 200 } }];
+	const model = { id: "deepseek-chat", contextWindow: 100_000, provider: "deepseek" };
+	const session = {
+		state: { messages, model },
+		messages,
+		model,
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		getContextUsage: () => undefined,
+		modelRegistry: { isUsingOAuth: () => false },
 		sessionManager: {
+			getSessionName: () => undefined,
+			getSessionId: () => "usage-line-test",
 			getUsageStatistics: () => ({
 				...totals,
 				totalTokens: totals.input + totals.output + totals.cacheRead + totals.cacheWrite,
@@ -43,13 +56,8 @@ function makeUsageComponent(
 				cost: 0,
 			}),
 		},
-		fetchUsageReports: async () => [],
-		modelRegistry: {
-			authStorage: { getOAuthAccountIdentity: () => undefined },
-		},
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		getContextUsage: () => undefined,
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+	const component = new StatusLineComponent(session, statusLineHost);
 	component.updateSettings({
 		preset: "custom",
 		leftSegments: [],

@@ -57,13 +57,14 @@ import type {
 	Context,
 	Message,
 	Model,
+	OpenAIResponsesHistoryPayload,
 	ProviderSessionState,
 	Tool,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
@@ -73,10 +74,9 @@ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/t
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
-import type { NonMessageTokenSource } from "../modes/utils/context-usage";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { computeNonMessageTokens, type NonMessageTokenSource } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
@@ -96,7 +96,7 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -223,6 +223,18 @@ const COMPACTION_RECOVERY_BAND = 0.8;
 /** Payload-shaped 413s share text patterns with overflow; trust the payload classification when local
  *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
 const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
+
+/** Arguments a compaction commit (or its pre-commit projection) is described by. */
+type CompactionProjectionArgs = {
+	summary: string;
+	shortSummary?: string;
+	tokensBefore: number;
+	firstKeptEntryId: string;
+	preserveData?: Record<string, unknown>;
+	details?: unknown;
+	method?: CompactionMethod;
+	providerReplayThroughEntryId?: string;
+};
 
 /** A speculation-produced compaction result, ready to commit at threshold. */
 interface ArmedSpeculation {
@@ -1746,7 +1758,7 @@ export class SessionMaintenance {
 		// other arm of compactionContextTokens) already accounts for it.
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
 			this.#tokenizer.countMessages(this.#host.messages(), opts) +
 			this.#tokenizer.countMessages(pendingMessages, opts)
 		);
@@ -1776,10 +1788,15 @@ export class SessionMaintenance {
 	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
 	 */
 	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
-		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
-		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize);
-		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		const opts = { excludeEncryptedReasoning: true } as const;
+		let tokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
+		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
 	}
 
@@ -2618,7 +2635,11 @@ export class SessionMaintenance {
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
-		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
+		let baseTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
 		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
 		const totalBudget = ctxWindow - reserve;
 		// Skip iff there is no headroom whatsoever; a text-only archive costs
@@ -2706,44 +2727,86 @@ export class SessionMaintenance {
 			},
 		);
 		let tokens =
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
 			this.#tokenizer.countMessage(summaryMessage);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
 		return tokens;
 	}
 
 	/**
-	 * Estimated context tokens after a compaction commit: fixed non-message
-	 * overhead + the summary message (with any snapcompact frames re-attached)
-	 * + every message from `firstKeptEntryId` to the branch leaf. Mirrors the
-	 * post-commit context rebuild; persisted as `tokensAfter` on the entry so
-	 * the transcript divider can show the before → after amounts.
+	 * Estimated context tokens after a compaction commit. The projection uses the
+	 * same synthetic compaction boundary and `buildSessionContext` conversion as
+	 * the post-commit rebuild, so message-bearing custom entries and branch
+	 * summaries are counted alongside ordinary messages. The result is persisted
+	 * as `tokensAfter` on the entry so the transcript divider can show the before
+	 * → after amounts.
 	 */
-	#projectCompactedContextTokens(args: {
-		summary: string;
-		shortSummary: string | undefined;
-		tokensBefore: number;
-		firstKeptEntryId: string;
-		preserveData: Record<string, unknown> | undefined;
-	}): number {
+	#projectCompactedContextTokens(args: CompactionProjectionArgs): number {
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		const branch = this.#host.sessionManager.getBranch();
+		const leaf = branch.at(-1);
 		const archive = snapcompact.getPreservedArchive(args.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
 			: undefined;
+		const projectionOptions = { excludeEncryptedReasoning: true } as const;
+		if (!leaf) {
+			const summaryMessage = createCompactionSummaryMessage(
+				args.summary,
+				args.tokensBefore,
+				new Date().toISOString(),
+				{
+					shortSummary: args.shortSummary,
+					method: args.method,
+					blocks,
+				},
+			);
+			return nonMessageTokens + this.#tokenizer.countMessages(convertToLlm([summaryMessage]), projectionOptions);
+		}
+		const pending: CompactionEntry = {
+			type: "compaction",
+			id: `${leaf.id}:compaction-tokens-projection`,
+			parentId: leaf.id,
+			timestamp: new Date().toISOString(),
+			summary: args.summary,
+			shortSummary: args.shortSummary,
+			firstKeptEntryId: args.firstKeptEntryId,
+			tokensBefore: args.tokensBefore,
+			method: args.method,
+			details: args.details,
+			preserveData: args.preserveData,
+			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
+		};
+		const rebuilt = buildSessionContext([...branch, pending]);
+		const rebuiltMessages = convertToLlm(rebuilt.messages);
+		const providerPayload = getOpenAiRemoteCompactionPayload(pending);
+		if (!providerPayload) {
+			return nonMessageTokens + this.#tokenizer.countMessages(rebuiltMessages, projectionOptions);
+		}
+
 		const summaryMessage = createCompactionSummaryMessage(args.summary, args.tokensBefore, new Date().toISOString(), {
 			shortSummary: args.shortSummary,
+			providerPayload,
+			method: args.method,
 			blocks,
 		});
-		let tokens =
-			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
-			this.#tokenizer.countMessage(summaryMessage);
-		let inKeptRegion = false;
-		for (const entry of this.#host.sessionManager.getBranch()) {
-			if (entry.id === args.firstKeptEntryId) inKeptRegion = true;
-			if (!inKeptRegion) continue;
-			if (entry.type === "message") tokens += this.#tokenizer.countMessage(entry.message);
-		}
-		return tokens;
+		const summaryTokens = this.#tokenizer.countMessages(convertToLlm([summaryMessage]), projectionOptions);
+		const nativeHistoryTokens = this.#countOpenAiNativeHistoryTokens(providerPayload);
+		return (
+			nonMessageTokens +
+			this.#tokenizer.countMessages(rebuiltMessages, projectionOptions) -
+			summaryTokens +
+			nativeHistoryTokens
+		);
+	}
+
+	#countOpenAiNativeHistoryTokens(providerPayload: OpenAIResponsesHistoryPayload): number {
+		const serialized = stringifyJson(providerPayload.items);
+		return serialized === undefined ? 0 : this.#tokenizer.countTokens(serialized);
 	}
 
 	/**
@@ -2956,7 +3019,11 @@ export class SessionMaintenance {
 		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
+		const baseTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
 		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
