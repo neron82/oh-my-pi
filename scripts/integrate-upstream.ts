@@ -81,7 +81,11 @@ Flags:
   --deploy-dir <path>    Install dir for the binary (default: ~/.local/bin).
   --auto-other <mode>    Conflicts outside the manifest: abort (default),
                          or resolve them on ours|theirs (including the
-                         requiresManualReview paths).
+                         requiresManualReview paths). Conflicts are always
+                         resolved per conflict region, so upstream's
+                         non-conflicting hunks in the same file survive; a
+                         protected path upstream renamed or deleted aborts
+                         instead of resurrecting the old file.
   --no-stash             Refuse a dirty worktree instead of auto-stashing
                          WIP around the merge (auto-stash is the default).
   --backup               Keep the previous binary as <deploy>/omp.previous.
@@ -420,16 +424,235 @@ async function unmergedPaths(repoRoot: string, verbose: boolean): Promise<string
 	return result.stdout.split("\n").filter(line => line.trim().length > 0);
 }
 
+/** One `<<<<<<<`-delimited conflict region of a worktree file, by line range. */
+interface ConflictRegion {
+	/** Index of the `<<<<<<<` line. */
+	readonly start: number;
+	/** Index of the `>>>>>>>` line. */
+	readonly end: number;
+	readonly ours: readonly string[];
+	readonly theirs: readonly string[];
+}
+
+/**
+ * Split a conflicted worktree file into its conflict regions. Everything
+ * outside a region is git's auto-merge result — upstream hunks that did not
+ * overlap a fork edit are already folded in, and a resolution MUST leave them
+ * byte-identical.
+ */
+function parseConflictRegions(text: string): ConflictRegion[] {
+	const lines = text.split("\n");
+	const regions: ConflictRegion[] = [];
+	let index = 0;
+	while (index < lines.length) {
+		if (lines[index].startsWith("<<<<<<< ")) {
+			const ours: string[] = [];
+			const theirs: string[] = [];
+			let section: "ours" | "base" | "theirs" = "ours";
+			let sawSeparator = false;
+			let end = index + 1;
+			for (; end < lines.length && !lines[end].startsWith(">>>>>>> "); end++) {
+				const line = lines[end];
+				// `|||||||` only appears with merge.conflictStyle=diff3/zdiff3;
+				// the base section is dropped either way.
+				if (line.startsWith("||||||| ")) {
+					section = "base";
+					continue;
+				}
+				if (line === "=======") {
+					section = "theirs";
+					sawSeparator = true;
+					continue;
+				}
+				if (section === "ours") ours.push(line);
+				else if (section === "theirs") theirs.push(line);
+			}
+			// A `<<<<<<<` line inside file content (a fixture, or this script's
+			// own source) has no separator/terminator: leave it untouched rather
+			// than read source bytes as a conflict.
+			if (end < lines.length && sawSeparator) {
+				regions.push({ start: index, end, ours, theirs });
+				index = end;
+			}
+		}
+		index++;
+	}
+	return regions;
+}
+
+/**
+ * Resolve every conflict region of `text` on one side, leaving the
+ * surrounding auto-merged content untouched. Returns `null` when the file has
+ * no conflict regions — a delete/modify or binary conflict, where git leaves
+ * no markers and the whole file is the conflict.
+ */
+function resolveConflictRegions(text: string, side: "ours" | "theirs"): { text: string; hunks: number } | null {
+	const regions = parseConflictRegions(text);
+	if (regions.length === 0) return null;
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let cursor = 0;
+	for (const region of regions) {
+		out.push(...lines.slice(cursor, region.start), ...(side === "ours" ? region.ours : region.theirs));
+		cursor = region.end + 1;
+	}
+	out.push(...lines.slice(cursor));
+	return { text: out.join("\n"), hunks: regions.length };
+}
+
+/**
+ * `old → new` for every upstream rename in the merged range, chained so a path
+ * moved across several releases maps straight to its current location.
+ */
+async function upstreamRenames(
+	repoRoot: string,
+	base: string,
+	upstreamRef: string,
+	verbose: boolean,
+): Promise<Map<string, string>> {
+	const statuses = (
+		await gitChecked(repoRoot, ["diff", "--find-renames", "--name-status", "--diff-filter=R", base, upstreamRef], {
+			verbose,
+		})
+	)
+		.split("\n")
+		.filter(line => line.trim().length > 0);
+	const direct = new Map<string, string>();
+	for (const line of statuses) {
+		const [status, from, to] = line.split("\t");
+		if (status?.startsWith("R") && from !== undefined && to !== undefined) direct.set(from, to);
+	}
+	const chained = new Map<string, string>();
+	for (const from of direct.keys()) {
+		let target = direct.get(from);
+		const seen = new Set<string>([from]);
+		while (target !== undefined && !seen.has(target)) {
+			seen.add(target);
+			target = direct.get(target);
+		}
+		if (target !== undefined) chained.set(from, target);
+		else if (direct.get(from) !== undefined) chained.set(from, direct.get(from)!);
+	}
+	return chained;
+}
+
+/**
+ * Manifest protection plus rename successors: a protected path upstream moved
+ * stays protected at its new location, and a fork-only file inside a renamed
+ * directory (git relocates it, or flags it as a file-location conflict) is
+ * protected at the relocated path.
+ */
+function expandProtectedPaths(protectedPaths: readonly string[], renames: ReadonlyMap<string, string>): Set<string> {
+	const expanded = new Set(protectedPaths);
+	for (const pathName of protectedPaths) {
+		let target = renames.get(pathName);
+		const seen = new Set<string>([pathName]);
+		while (target !== undefined && !seen.has(target)) {
+			expanded.add(target);
+			seen.add(target);
+			target = renames.get(target);
+		}
+		for (const [from, to] of renames) {
+			if (path.posix.dirname(from) !== path.posix.dirname(pathName)) continue;
+			const sourceDir = path.posix.dirname(from);
+			const targetDir = path.posix.dirname(to);
+			if (sourceDir === targetDir) continue;
+			expanded.add(path.posix.join(targetDir, path.posix.basename(pathName)));
+		}
+	}
+	return expanded;
+}
+
 interface MergeOutcome {
 	readonly mergeSha: string | null;
 	readonly forkResolved: readonly string[];
+	/** Conflict regions taken from the fork side, per resolved path. */
+	readonly forkHunks: ReadonlyMap<string, number>;
 	readonly otherResolved: readonly string[];
 	readonly aborted: boolean;
 	readonly abortedPaths: readonly string[];
+	/** Why a path could not be resolved (parallel to `abortedPaths`). */
+	readonly abortReasons: readonly string[];
+}
+
+type ResolutionOutcome = { readonly hunks: number } | "aborted";
+
+/**
+ * Resolve one unmerged path on `side`. Conflicts are resolved region by
+ * region (`resolveConflictRegions`) so upstream's non-conflicting changes in
+ * the same file survive — `git checkout --ours -- <path>` would throw the
+ * whole file, and with it every auto-merged upstream hunk, back to the fork's
+ * pre-merge copy.
+ */
+async function resolvePathToSide(
+	repoRoot: string,
+	pathName: string,
+	side: "ours" | "theirs",
+	verbose: boolean,
+): Promise<ResolutionOutcome> {
+	const file = Bun.file(path.join(repoRoot, pathName));
+	const text = await file.text().catch(() => null);
+	if (text === null) return "aborted";
+
+	const resolved = resolveConflictRegions(text, side);
+	if (resolved !== null) {
+		await Bun.write(path.join(repoRoot, pathName), resolved.text);
+		await gitChecked(repoRoot, ["add", "--", pathName], { verbose });
+		return { hunks: resolved.hunks };
+	}
+
+	// No conflict markers: delete/modify or binary. Keeping a file upstream
+	// deleted (or deleting one only we have) is a whole-file decision.
+	const stages = await runGit(repoRoot, ["ls-files", "-u", "--", pathName], { verbose });
+	const stageOf = (line: string): string | undefined => line.split("\t")[0]?.trim().split(" ").pop();
+	const stageLines = stages.stdout.split("\n").filter(line => line.trim().length > 0);
+	const hasOurs = stageLines.some(line => stageOf(line) === "2");
+	const hasTheirs = stageLines.some(line => stageOf(line) === "3");
+	if (hasOurs && hasTheirs) return "aborted";
+	if (side === "ours" ? !hasOurs : !hasTheirs) {
+		// The chosen side has no file: resolve by deleting it.
+		const removed = await runGit(repoRoot, ["rm", "-f", "-q", "--", pathName], { verbose });
+		if (removed.exitCode === 0) return { hunks: 0 };
+		const forced = await runGit(repoRoot, ["update-index", "--force-remove", "--", pathName], { verbose });
+		return forced.exitCode === 0 ? { hunks: 0 } : "aborted";
+	}
+	await gitChecked(repoRoot, ["add", "--", pathName], { verbose });
+	return { hunks: 0 };
+}
+
+/** Whether `pathName` exists in the upstream tree at `upstreamRef`. */
+async function upstreamHasPath(
+	repoRoot: string,
+	upstreamRef: string,
+	pathName: string,
+	verbose: boolean,
+): Promise<boolean> {
+	const result = await runGit(repoRoot, ["cat-file", "-e", `${upstreamRef}:${pathName}`], { verbose });
+	return result.exitCode === 0;
+}
+
+/** Best-effort hint: an upstream file with the same basename (a moved home). */
+async function suggestUpstreamHome(
+	repoRoot: string,
+	upstreamRef: string,
+	pathName: string,
+	homeCache: Map<string, string | undefined>,
+	verbose: boolean,
+): Promise<string | undefined> {
+	const base = path.posix.basename(pathName);
+	if (homeCache.has(base)) return homeCache.get(base);
+	const listing = await gitChecked(repoRoot, ["ls-tree", "-r", "--name-only", upstreamRef], { verbose });
+	const match = listing
+		.split("\n")
+		.filter(line => path.posix.basename(line) === base)
+		.sort((a, b) => a.length - b.length)[0];
+	homeCache.set(base, match);
+	return match;
 }
 
 async function runMerge(
 	repoRoot: string,
+	base: string,
 	upstreamRef: string,
 	message: string,
 	manifest: ForkPathsManifest,
@@ -439,9 +662,18 @@ async function runMerge(
 	const merge = await runGit(repoRoot, ["merge", "--no-edit", "--no-ff", "--no-verify", "-m", message, upstreamRef], {
 		verbose,
 	});
+	const forkHunks = new Map<string, number>();
 	if (merge.exitCode === 0) {
 		const mergeSha = (await gitChecked(repoRoot, ["rev-parse", "HEAD"], { verbose })).trim();
-		return { mergeSha, forkResolved: [], otherResolved: [], aborted: false, abortedPaths: [] };
+		return {
+			mergeSha,
+			forkResolved: [],
+			forkHunks,
+			otherResolved: [],
+			aborted: false,
+			abortedPaths: [],
+			abortReasons: [],
+		};
 	}
 
 	const unresolved = await unmergedPaths(repoRoot, verbose);
@@ -449,30 +681,58 @@ async function runMerge(
 		throw new Error(`git merge failed for an unexpected reason:\n${merge.stderr.trim()}`);
 	}
 
-	const forkSet = new Set(manifest.forkWinsOnConflict);
+	// Protection follows upstream's renames: a protected file that upstream
+	// moved is protected at its new path, so the merge of the fork's edits
+	// lands where the tree imports it.
+	const renames = await upstreamRenames(repoRoot, base, upstreamRef, verbose);
+	const forkSet = expandProtectedPaths(manifest.forkWinsOnConflict, renames);
 
 	const forkResolved: string[] = [];
 	const otherResolved: string[] = [];
 	const abortedPaths: string[] = [];
+	const abortReasons: string[] = [];
+	const homeCache = new Map<string, string | undefined>();
 
 	for (const pathName of unresolved) {
-		// fork-protected paths always keep the fork version; everything else
-		// resolves on the requested side or aborts the merge (default).
-		const side = forkSet.has(pathName) ? "ours" : autoOther === "abort" ? null : autoOther;
+		const protectedPath = forkSet.has(pathName);
+		const movedTo = renames.get(pathName);
+		const existsUpstream = await upstreamHasPath(repoRoot, upstreamRef, pathName, verbose);
+		// A fork-only file never existed upstream; a *deleted* file did, and
+		// keeping it would resurrect code upstream removed. git relocates an
+		// added file when its directory is renamed upstream (flagging it here);
+		// the relocation target is protected through `expandProtectedPaths`.
+		const existedUpstream = existsUpstream || (await upstreamHasPath(repoRoot, base, pathName, verbose));
+
+		// Fork-owned code that upstream renamed or deleted cannot be resolved
+		// mechanically: keeping the old path resurrects code upstream removed,
+		// and dropping it can silently lose a fork adaptation. Abort and let a
+		// human port the change (the reason names the likely new home).
+		if (protectedPath && !existsUpstream && existedUpstream && autoOther === "abort") {
+			const home = movedTo ?? (await suggestUpstreamHome(repoRoot, upstreamRef, pathName, homeCache, verbose));
+			abortedPaths.push(pathName);
+			abortReasons.push(
+				`upstream deleted this fork-protected path${home ? ` (likely home: ${home})` : ""}; port the fork change there (or pass --auto-other=ours|theirs)`,
+			);
+			continue;
+		}
+
+		// fork-protected paths keep the fork side of every conflicting region;
+		// everything else resolves on the requested side or aborts the merge.
+		const side: "ours" | "theirs" | null = protectedPath ? "ours" : autoOther === "abort" ? null : autoOther;
 		if (side === null) {
 			abortedPaths.push(pathName);
+			abortReasons.push("outside the fork manifest (pass --auto-other=ours|theirs to resolve automatically)");
 			continue;
 		}
-		const checkout = await runGit(repoRoot, ["checkout", side === "ours" ? "--ours" : "--theirs", "--", pathName], {
-			verbose,
-		});
-		if (checkout.exitCode !== 0) {
+		const result = await resolvePathToSide(repoRoot, pathName, side, verbose);
+		if (result === "aborted") {
 			abortedPaths.push(pathName);
+			abortReasons.push("no textual conflict to resolve (binary, or deleted/added on one side); resolve manually");
 			continue;
 		}
-		await gitChecked(repoRoot, ["add", "--", pathName], { verbose });
-		if (forkSet.has(pathName)) {
+		if (protectedPath) {
 			forkResolved.push(pathName);
+			if (result.hunks > 0) forkHunks.set(pathName, result.hunks);
 		} else {
 			otherResolved.push(pathName);
 		}
@@ -480,7 +740,15 @@ async function runMerge(
 
 	if (abortedPaths.length > 0) {
 		await gitChecked(repoRoot, ["merge", "--abort"], { verbose });
-		return { mergeSha: null, forkResolved, otherResolved, aborted: true, abortedPaths };
+		return {
+			mergeSha: null,
+			forkResolved,
+			forkHunks,
+			otherResolved,
+			aborted: true,
+			abortedPaths,
+			abortReasons,
+		};
 	}
 
 	const continueMerge = await runGit(repoRoot, ["commit", "--no-verify", "-m", message], { verbose });
@@ -488,7 +756,15 @@ async function runMerge(
 		throw new Error(`Could not finalize the merge:\n${continueMerge.stderr.trim()}`);
 	}
 	const mergeSha = (await gitChecked(repoRoot, ["rev-parse", "HEAD"], { verbose })).trim();
-	return { mergeSha, forkResolved, otherResolved, aborted: false, abortedPaths: [] };
+	return {
+		mergeSha,
+		forkResolved,
+		forkHunks,
+		otherResolved,
+		aborted: false,
+		abortedPaths: [],
+		abortReasons: [],
+	};
 }
 
 async function pathChangedIn(
@@ -800,15 +1076,19 @@ async function syncManifest(
 	upstreamRef: string,
 	verbose: boolean,
 ): Promise<void> {
+	// Rename-aware: a fork file upstream moved is recorded at its *current*
+	// path, so the next merge protects the location the tree imports.
 	const statuses = (
-		await gitChecked(repoRoot, ["diff", "--name-status", "--no-renames", upstreamRef, "HEAD"], { verbose })
+		await gitChecked(repoRoot, ["diff", "--find-renames", "--name-status", upstreamRef, "HEAD"], { verbose })
 	)
 		.split("\n")
 		.filter(line => line.trim().length > 0);
 	const forkPaths = statuses
 		.map(line => {
-			const [status, ...rest] = line.split("\t");
-			const pathName = rest.join("\t");
+			const [status = "", ...rest] = line.split("\t");
+			// `R<score>` / `C<score>` lines carry `<old>\t<new>`; the fork's
+			// version of the file lives at the destination.
+			const pathName = status.startsWith("R") || status.startsWith("C") ? (rest[1] ?? "") : (rest[0] ?? "");
 			return { status, pathName };
 		})
 		.filter(entry => entry.status !== "D" && entry.pathName.length > 0)
@@ -963,15 +1243,26 @@ async function main(): Promise<void> {
 				console.log("==> Stashed working tree WIP around the merge (auto-stash; popped back after)");
 			}
 
-			const outcome = await runMerge(repoRoot, upstreamRef, plan.message, manifest, flags.autoOther, flags.verbose);
+			const outcome = await runMerge(
+				repoRoot,
+				plan.base,
+				upstreamRef,
+				plan.message,
+				manifest,
+				flags.autoOther,
+				flags.verbose,
+			);
 
 			if (outcome.aborted) {
 				if (stashed) {
 					await gitChecked(repoRoot, ["stash", "pop"], { verbose: flags.verbose });
 				}
+				const detail = outcome.abortedPaths
+					.map((pathName, index) => `  ${pathName}\n      ${outcome.abortReasons[index] ?? ""}`)
+					.join("\n");
 				throw new Error(
-					`Merge aborted; no changes were made. Manual resolution required for:\n${outcome.abortedPaths.map(pathName => `  ${pathName}`).join("\n")}\n` +
-						`Resolve them with git mergetool (rerere is enabled and will remember the resolution), then run:\n` +
+					`Merge aborted; no changes were made. Manual resolution required for:\n${detail}\n` +
+						`Resolve them in the worktree (rerere is enabled and will remember the resolution), then run:\n` +
 						`  git commit          # complete the merge\n` +
 						`  bun scripts/integrate-upstream.ts --no-fetch --no-merge\n` +
 						`Alternatively rerun with --auto-other=ours|theirs to resolve them on one side automatically.`,
@@ -993,7 +1284,11 @@ async function main(): Promise<void> {
 			console.log(`\n==> Integrated: ${plan.message}`);
 			console.log(`    merge commit: ${mergeSha?.slice(0, 12) ?? "?"}`);
 			if (outcome.forkResolved.length > 0) {
-				console.log(`    kept fork version on conflict: ${outcome.forkResolved.join(", ")}`);
+				console.log("    kept fork side of conflicting hunks (upstream's other hunks merged):");
+				for (const pathName of outcome.forkResolved) {
+					const hunks = outcome.forkHunks.get(pathName) ?? 0;
+					console.log(`      ${pathName} (${hunks} conflicting region${hunks === 1 ? "" : "s"})`);
+				}
 			}
 			if (outcome.otherResolved.length > 0) {
 				console.log(`    auto-resolved on one side: ${outcome.otherResolved.join(", ")}`);
@@ -1007,6 +1302,12 @@ async function main(): Promise<void> {
 			summary.push(
 				`integrated ${plan.base.slice(0, 8)}..${plan.head.slice(0, 8)} (${plan.newCount} commits) as ${mergeSha?.slice(0, 12) ?? "?"}`,
 			);
+			if (outcome.forkResolved.length > 0) {
+				const hunks = [...outcome.forkHunks.values()].reduce((total, value) => total + value, 0);
+				summary.push(
+					`fork side kept in ${hunks} conflict region${hunks === 1 ? "" : "s"} across ${outcome.forkResolved.length} path${outcome.forkResolved.length === 1 ? "" : "s"} (upstream's non-conflicting hunks preserved)`,
+				);
+			}
 		}
 	}
 

@@ -60,7 +60,12 @@ async function git(cwd: string, args: readonly string[], env: Record<string, str
 
 /** Initialize a fixture fork colony: work repo + two bare remotes (upstream, fork sim). */
 async function makeFixture(
-	options: { upstreamCommits?: "none" | "regular" | "tagged"; dirty?: boolean } = {},
+	options: {
+		upstreamCommits?: "none" | "regular" | "tagged";
+		dirty?: boolean;
+		/** Overrides for the base commit's files, so a merge can have a multi-line ancestor. */
+		baseFiles?: CommitFiles;
+	} = {},
 ): Promise<Fixture> {
 	const home = await tmpdir("integrate-home-");
 	const work = await tmpdir("integrate-work-");
@@ -72,6 +77,10 @@ async function makeFixture(
 	await fs.writeFile(path.join(work, "lib", "shared.ts"), 'export const shared = "base";\n');
 	await fs.writeFile(path.join(work, "lib", "upstream-only.ts"), 'export const upstreamOnly = "base";\n');
 	await fs.writeFile(path.join(work, "docs", "changelog.md"), "# Changelog\n\n## [Unreleased]\n\n- base\n");
+	for (const [relative, content] of Object.entries(options.baseFiles ?? {})) {
+		await fs.mkdir(path.dirname(path.join(work, relative)), { recursive: true });
+		await fs.writeFile(path.join(work, relative), content);
+	}
 
 	const env = envFor(home);
 	const baseEnv = {
@@ -178,7 +187,12 @@ async function addForkCommit(fixture: Fixture, files: CommitFiles, message: stri
 }
 
 /** Commit and push extra work on the upstream main side, returning to the fork branch. */
-async function addUpstreamCommit(fixture: Fixture, files: CommitFiles, message: string): Promise<void> {
+async function addUpstreamCommit(
+	fixture: Fixture,
+	files: CommitFiles,
+	message: string,
+	removals: readonly string[] = [],
+): Promise<void> {
 	const env = envFor(fixture.home);
 	const baseEnv = {
 		...env,
@@ -188,13 +202,34 @@ async function addUpstreamCommit(fixture: Fixture, files: CommitFiles, message: 
 		GIT_COMMITTER_EMAIL: "dev@test",
 	};
 	await git(fixture.work, ["checkout", "main"], env);
+	for (const relative of removals) await fs.rm(path.join(fixture.work, relative));
 	for (const [relative, content] of Object.entries(files)) {
+		await fs.mkdir(path.dirname(path.join(fixture.work, relative)), { recursive: true });
 		await fs.writeFile(path.join(fixture.work, relative), content);
 	}
-	await git(fixture.work, ["add", ...Object.keys(files)], env);
+	await git(fixture.work, ["add", "-A"], env);
 	await git(fixture.work, ["commit", "-m", message], baseEnv);
 	await git(fixture.work, ["push", "upstream", "main"], env);
 	await git(fixture.work, ["checkout", "prompt-cache-stability"], env);
+}
+
+/** `count` lines of stable source, so a merge can conflict on one line and auto-merge a distant one. */
+function sourceLines(count: number): string {
+	return `${Array.from({ length: count }, (_, index) => `export const l${index + 1} = "base";`).join("\n")}\n`;
+}
+
+/** Replace the 1-based `line` of a {@link sourceLines} file. */
+function editLine(source: string, line: number, value: string): string {
+	return source
+		.split("\n")
+		.map((text, index) => (index + 1 === line ? `export const l${index + 1} = "${value}";` : text))
+		.join("\n");
+}
+
+async function headSha(fixture: Fixture): Promise<string> {
+	const env = envFor(fixture.home);
+	const proc = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: fixture.work, env, stdout: "pipe" });
+	return (await new Response(proc.stdout).text()).trim();
 }
 
 async function headSubject(fixture: Fixture): Promise<string> {
@@ -246,8 +281,8 @@ describe("integrate-upstream", () => {
 		expect(await fileText(fixture, "lib/fork-only.ts")).toBe('export const forkOnly = "fork";\n');
 		expect(await fileText(fixture, "lib/upstream-only.ts")).toBe('export const upstreamOnly = "upstream";\n');
 		expect(await fileText(fixture, "lib/upstream-new.ts")).toBe("export const upstreamNew = true;\n");
-		expect(result.stdout).toContain("kept fork version on conflict: lib/stability.ts");
-		expect(result.stdout).toContain("lib/stability.ts");
+		expect(result.stdout).toContain("kept fork side of conflicting hunks");
+		expect(result.stdout).toContain("lib/stability.ts (1 conflicting region)");
 		expect(result.stdout).toContain("push target:       forksim");
 		expect(await bareSubject(fixture.forkSim, "refs/heads/prompt-cache-stability", envFor(fixture.home))).toMatch(
 			/^Merge upstream main/,
@@ -425,6 +460,121 @@ describe("integrate-upstream", () => {
 			await new Response((await Bun.spawn(["git", "rev-parse", "HEAD"], { cwd: fixture.work, env })).stdout).text()
 		).trim();
 		expect(headAfter).toBe(fixture.headBefore);
+	});
+
+	test("keeps upstream's non-conflicting hunks in a protected path that conflicts", async () => {
+		// Regression: resolving a protected file with `git checkout --ours --
+		// <path>` throws the whole file back to the fork's copy and silently
+		// discards every upstream hunk git had already auto-merged into it —
+		// which is how protected files froze at old upstream releases.
+		const base = sourceLines(8);
+		const fixture = await makeFixture({ upstreamCommits: "none", baseFiles: { "lib/stability.ts": base } });
+		await addForkCommit(fixture, { "lib/stability.ts": editLine(base, 2, "fork") }, "fork: stability line");
+		await addUpstreamCommit(
+			fixture,
+			{ "lib/stability.ts": editLine(editLine(base, 2, "upstream"), 8, "upstream-tail") },
+			"upstream: stability lines",
+		);
+
+		const result = await runScript(fixture);
+
+		expect(result.exitCode).toBe(0);
+		const merged = await fileText(fixture, "lib/stability.ts");
+		// The conflicting region takes the fork side…
+		expect(merged).toContain('export const l2 = "fork";');
+		// …while upstream's untouched hunk survives the resolution.
+		expect(merged).toContain('export const l8 = "upstream-tail";');
+	});
+
+	test("follows an upstream rename of a protected path and keeps it protected at the new location", async () => {
+		const base = sourceLines(24);
+		const fixture = await makeFixture({ upstreamCommits: "none", baseFiles: { "lib/stability.ts": base } });
+		await addForkCommit(fixture, { "lib/stability.ts": editLine(base, 3, "fork") }, "fork: stability line");
+		await addUpstreamCommit(
+			fixture,
+			{ "lib/stability-next.ts": editLine(editLine(base, 3, "upstream"), 20, "upstream-tail") },
+			"upstream: move stability",
+			["lib/stability.ts"],
+		);
+
+		const result = await runScript(fixture);
+
+		expect(result.exitCode).toBe(0);
+		const merged = await fileText(fixture, "lib/stability-next.ts");
+		expect(merged).toContain('export const l3 = "fork";');
+		expect(merged).toContain('export const l20 = "upstream-tail";');
+		expect(await Bun.file(path.join(fixture.work, "lib", "stability.ts")).exists()).toBe(false);
+	});
+
+	test("keeps a fork-only file that upstream's directory rename relocated", async () => {
+		const base = sourceLines(24);
+		const fixture = await makeFixture({ upstreamCommits: "none", baseFiles: { "lib/stability.ts": base } });
+		await addForkCommit(fixture, { "lib/stability.ts": editLine(base, 3, "fork") }, "fork: stability line");
+		// Upstream moves the whole directory. The fork's extra file there has no
+		// upstream counterpart, so git flags it as "added in HEAD inside a
+		// directory that was renamed" — at the new path, which must stay
+		// protected exactly like the old one was.
+		await addUpstreamCommit(
+			fixture,
+			{
+				"lib-next/stability.ts": base,
+				"lib-next/shared.ts": 'export const shared = "base";\n',
+				"lib-next/upstream-only.ts": 'export const upstreamOnly = "base";\n',
+			},
+			"upstream: move lib",
+			["lib/stability.ts", "lib/shared.ts", "lib/upstream-only.ts"],
+		);
+
+		const result = await runScript(fixture);
+
+		expect(result.exitCode).toBe(0);
+		expect(await fileText(fixture, "lib-next/fork-only.ts")).toBe('export const forkOnly = "fork";\n');
+		expect(await Bun.file(path.join(fixture.work, "lib", "fork-only.ts")).exists()).toBe(false);
+		expect(result.stdout).toContain("lib-next/fork-only.ts");
+	});
+
+	test("aborts instead of resurrecting a fork-protected path upstream deleted", async () => {
+		const fixture = await makeFixture({ upstreamCommits: "none" });
+		await addForkCommit(
+			fixture,
+			{ "lib/stability.ts": 'export const stability = "fork-edit";\n' },
+			"fork: edit stability",
+		);
+		await addUpstreamCommit(
+			fixture,
+			{ "lib/replacement.ts": "export const replacement = true;\n" },
+			"upstream: drop stability",
+			["lib/stability.ts"],
+		);
+		const headBefore = await headSha(fixture);
+
+		const result = await runScript(fixture);
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout + result.stderr).toContain("deleted this fork-protected path");
+		expect(result.stdout + result.stderr).toContain("lib/stability.ts");
+		// Aborted: the branch tip and the worktree are exactly as before.
+		expect(await headSha(fixture)).toBe(headBefore);
+		expect(await fileText(fixture, "lib/stability.ts")).toBe('export const stability = "fork-edit";\n');
+	});
+
+	test("--auto-other decides a protected path upstream deleted on the requested side", async () => {
+		const fixture = await makeFixture({ upstreamCommits: "none" });
+		await addForkCommit(
+			fixture,
+			{ "lib/stability.ts": 'export const stability = "fork-edit";\n' },
+			"fork: edit stability",
+		);
+		await addUpstreamCommit(
+			fixture,
+			{ "lib/replacement.ts": "export const replacement = true;\n" },
+			"upstream: drop stability",
+			["lib/stability.ts"],
+		);
+
+		const kept = await runScript(fixture, ["--auto-other=ours"]);
+		expect(kept.exitCode).toBe(0);
+		expect(await fileText(fixture, "lib/stability.ts")).toBe('export const stability = "fork-edit";\n');
 	});
 
 	test("--dry-run leaves head, worktree, and the fork remote untouched", async () => {
