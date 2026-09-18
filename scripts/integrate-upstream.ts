@@ -1346,19 +1346,31 @@ async function main(): Promise<void> {
 
 	if (!flags.noCheck) {
 		// After a manual resolution (`--no-merge`) the merge already happened, so
-		// `base` is unset. Use the merge commit's first parent — the fork's
-		// pre-merge tip — as the comparison point: `merge-base HEAD upstream`
-		// would collapse to upstream itself once the merge is committed, hiding
-		// every path the merge touched (and silently skipping the dependency
-		// install and the Rust suite, which are keyed on what changed).
+		// `base` is unset. Compare against the fork's pre-merge tip — the first
+		// parent of the most recent integration merge on this branch's
+		// first-parent line — so the dependency install and the Rust suite (both
+		// keyed on what changed) see everything the integration brought in.
+		// `merge-base HEAD upstream` would collapse to upstream itself once the
+		// merge is committed, and HEAD-against-itself hides it entirely.
 		let checkBase = base;
 		if (checkBase === null) {
-			const parents = (
-				await gitChecked(repoRoot, ["rev-list", "--parents", "-n", "1", "HEAD"], { verbose: flags.verbose })
-			)
-				.trim()
-				.split(" ");
-			checkBase = parents[1] ?? parents[0] ?? "HEAD";
+			const lastMerge = (
+				await gitChecked(repoRoot, ["rev-list", "--first-parent", "-n", "1", "--merges", "HEAD"], {
+					verbose: flags.verbose,
+				})
+			).trim();
+			const parents =
+				lastMerge.length > 0
+					? (
+							await gitChecked(repoRoot, ["rev-list", "--parents", "-n", "1", lastMerge], {
+								verbose: flags.verbose,
+							})
+						)
+							.trim()
+							.split(" ")
+					: [];
+			checkBase =
+				parents[1] ?? (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
 		}
 		await runChecks(repoRoot, checkBase, manifest, flags.verbose);
 		summary.push("checks passed (type-check + fork stability tests)");
