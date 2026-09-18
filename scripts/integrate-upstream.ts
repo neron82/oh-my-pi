@@ -1312,8 +1312,22 @@ async function main(): Promise<void> {
 	}
 
 	if (!flags.noCheck) {
-		const checkBase =
-			base ?? (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
+		// After a manual resolution (`--no-merge`) the merge already happened, so
+		// `base` is unset — compare against the upstream merge base instead of
+		// HEAD-against-itself, otherwise the dependency install and the Rust suite
+		// (both keyed on what changed) silently skip.
+		let checkBase = base;
+		if (checkBase === null) {
+			const upstreamMergeBase = await runGit(
+				repoRoot,
+				["merge-base", "HEAD", `refs/remotes/${resolved.remote}/${resolved.ref}`],
+				{ verbose: flags.verbose },
+			);
+			checkBase =
+				upstreamMergeBase.exitCode === 0 && upstreamMergeBase.stdout.trim().length > 0
+					? upstreamMergeBase.stdout.trim()
+					: (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
+		}
 		await runChecks(repoRoot, checkBase, manifest, flags.verbose);
 		summary.push("checks passed (type-check + fork stability tests)");
 	}
