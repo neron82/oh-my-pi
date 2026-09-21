@@ -340,6 +340,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	messagesCarryImages,
 	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
 	SILENT_ABORT_MARKER,
@@ -375,6 +376,7 @@ import { getRestorableSessionModels, isTranscriptEntry } from "./session-context
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText } from "./session-dump-format";
 import { DeferredRunManager } from "./deferred-run-manager";
+import { isImageInputRejection, withoutImageInput } from "./image-input-rejection";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
@@ -3537,6 +3539,15 @@ export class AgentSession {
 			// outside the session transcript (issue #6177).
 			logProviderTurnError(msg);
 
+			// A local backend that died on a request carrying images dies
+			// identically on every replay — the images are the poison. Correct the
+			// session model's image capability HERE, before any retry, credential
+			// rotation, or fallback is scheduled, so the replay the recovery path is
+			// about to send leaves images off the wire instead of re-poisoning the
+			// backend for the whole retry budget (llama.cpp's speculative-draft path
+			// refuses any prompt with an image chunk).
+			this.#correctImageInputCapability(msg);
+
 			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
 			// expired/revoked token) so stale tokens aren't reused on the next request.
 			// Account usage caps and concurrency caps leave the credential valid: the
@@ -5261,6 +5272,42 @@ export class AgentSession {
 				error,
 			});
 		}
+	}
+
+	/**
+	 * Withdraw image input from a local backend that just failed a turn while the
+	 * request carried images (`isImageInputRejection`). A locally served engine
+	 * dies mid-decode instead of rejecting the request, and it dies *identically*
+	 * on every replay: llama.cpp's speculative-decoding draft path refuses any
+	 * prompt containing an image chunk, so a blind retry spends the whole retry
+	 * budget re-poisoning the backend's slot prompt cache while the turn cannot
+	 * succeed.
+	 *
+	 * The declared capability is the single input every image gate reads, so
+	 * correcting the live model here — the same shape as the probed runtime
+	 * context window folded in by {@link #refreshLazyLocalContext} — stops the
+	 * outbound scrub from putting images on the wire, keeps `snapcompact` from
+	 * emitting bitmap frames the wire would silently drop, and routes new
+	 * attachments to the vision-description fallback. History keeps its images,
+	 * so switching to a model that accepts them restores vision for the resend.
+	 */
+	#correctImageInputCapability(msg: AssistantMessage): void {
+		const model = this.model;
+		if (!model || !isImageInputRejection(model, msg)) return;
+		if (!messagesCarryImages(this.agent.state.messages)) return;
+		this.agent.setModel(withoutImageInput(model));
+		logger.warn("withdrew image input from a local backend that failed with images attached", {
+			provider: model.provider,
+			model: model.id,
+			errorStatus: msg.errorStatus,
+			errorMessage: msg.errorMessage,
+		});
+		this.emitNotice(
+			"warning",
+			`${model.provider}/${model.id} failed the request with images attached (HTTP ${msg.errorStatus}). ` +
+				"Requests continue without images for this session; switch models to restore vision.",
+			"provider",
+		);
 	}
 
 	/**

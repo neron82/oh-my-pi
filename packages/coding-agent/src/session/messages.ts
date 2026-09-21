@@ -763,6 +763,40 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 }
 
 /**
+ * Whether any message on the branch carries image content — the same carriers
+ * {@link stripImagesFromMessage} enumerates, read-only. Callers use it to
+ * attribute a local backend's mid-decode failure to the prompt's images before
+ * withdrawing image input from the session model (`isImageInputRejection`).
+ */
+export function messagesCarryImages(messages: readonly AgentMessage[]): boolean {
+	for (const message of messages) {
+		switch (message.role) {
+			case "user":
+			case "developer":
+			case "custom":
+			case "hookMessage":
+				if (Array.isArray(message.content) && message.content.some(part => part.type === "image")) return true;
+				break;
+			case "toolResult": {
+				if (message.content.some(part => part.type === "image")) return true;
+				const details = message.details as { images?: unknown } | null | undefined;
+				if (details && Array.isArray(details.images) && details.images.length > 0) return true;
+				break;
+			}
+			case "bashExecution":
+				if (message.images !== undefined && message.images.length > 0) return true;
+				break;
+			case "fileMention":
+				if (message.files.some(file => file.image !== undefined)) return true;
+				break;
+			default:
+				break;
+		}
+	}
+	return false;
+}
+
+/**
  * Replace every `ImageContent` block in already-converted LLM {@link Message}s
  * with a text placeholder, returning a new array only when something changed.
  *

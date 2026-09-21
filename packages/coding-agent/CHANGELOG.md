@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed image-carrying turns wedging on a local inference backend that dies mid-decode over them (llama.cpp with a speculative draft model fails every request containing an image, including one carrying a snapcompact frame): the session now withdraws image input from that model, so the retry sends the turn without images instead of replaying the same doomed request, and warns that vision stays off until another model is selected.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

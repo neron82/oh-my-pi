@@ -59,7 +59,9 @@ policy, the recovery flow and the CI verification net are documented in
 
 Beyond cache stability the fork carries a few smaller hardening changes
 (durable auto-resume after a provider wait limit, teardown of leaking LSP/DAP
-adapters on frame overflow, sanitized MCP result rendering). Those are
+adapters on frame overflow, sanitized MCP result rendering, and image input
+withdrawn from a local engine that dies mid-decode over it — llama.cpp with a
+speculative draft model fails *every* request carrying an image). Those are
 incidental — the stability work is the point.
 
 ---

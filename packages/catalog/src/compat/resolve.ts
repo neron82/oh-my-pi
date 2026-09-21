@@ -255,6 +255,22 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	return false;
 }
 
+/**
+ * True when `provider`/`baseUrl` name a locally served inference endpoint — a
+ * local engine (llama.cpp / LM Studio / vLLM / Ollama) or any loopback/RFC1918
+ * base URL. Mechanism, not model policy: the same fact that selects the local
+ * stream timeouts and reasoning-replay defaults above.
+ *
+ * Callers use it to scope what a *local* backend can be trusted with. A local
+ * server dies mid-decode where a hosted provider would reject the request, and
+ * a single-user engine on the caller's own machine is the one place a runtime
+ * capability correction is safely recoverable — so the coding-agent withdraws
+ * image input from such a backend once it proves it cannot serve it.
+ */
+export function isLocalServingBackend(host: { provider: string; baseUrl?: string | undefined }): boolean {
+	return LOCAL_OPENAI_COMPAT_PROVIDERS[host.provider] === true || hasLocalLoopbackBaseUrl(host.baseUrl);
+}
+
 function resolveReasoningDisableMode(
 	thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"],
 ): ResolvedOpenAISharedCompat["reasoningDisableMode"] {
