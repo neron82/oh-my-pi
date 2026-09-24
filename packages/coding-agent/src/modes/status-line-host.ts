@@ -7,6 +7,22 @@ import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
 import { GH_COMMAND_TIMEOUT_MS, github } from "../utils/github";
 import { calculateTokensPerSecond } from "../utils/token-rate";
 
+import {
+	cfgGitEnabled,
+	cfgStatusLineCompactThinkingLevel,
+	cfgStatusLineContextLine,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+	cfgStatusLineSegmentOptions,
+	cfgStatusLineSeparator,
+	cfgStatusLineSessionAccent,
+	cfgStatusLineShowHookStatus,
+	cfgStatusLineTransparent,
+	cfgTuiCodexResetFireworks,
+} from "./settings";
+import { cfgGoalStatusInFooter } from "../goals/settings";
+
 /**
  * Session capabilities the host consults beyond the display subset. Every
  * field is optional so display-only sessions (collab guest replicas, test
@@ -30,14 +46,14 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		contextLine: settings.get("statusLine.contextLine"),
 		usageLine: settings.get("statusLine.usageLine"),
 	}),
-	gitEnabled: () => settings.get("git.enabled"),
-	codexResetFireworksEnabled: () => settings.get("tui.codexResetFireworks"),
+	gitEnabled: () => cfgGitEnabled.get(settings),
+	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
 	getSettingsRevision: () => settings.revision,
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
-	goalStatusInFooter: session => (session.settings ?? settings).get("goal.statusInFooter"),
+	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
 	activeAccount: (session, provider) =>
-		session.modelRegistry?.authStorage?.getOAuthAccountIdentity(provider, session.sessionId),
+		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,
@@ -45,12 +61,6 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		github.run(cwd, ["pr", "view", "--json", "number,url"], AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS)),
 	calculateTokensPerSecond,
 	limitMatchesActiveAccount,
-	computeCompactionBoundaries: (session, contextWindow, model) => {
-		const source = session.settings;
-		return getSessionCompactionBoundaries(
-			typeof source?.getGroup === "function" ? source : settings,
-			contextWindow,
-			model,
-		);
-	},
+	computeCompactionBoundaries: (session, contextWindow, model) =>
+		getSessionCompactionBoundaries(session.settings ?? settings, contextWindow, model),
 };

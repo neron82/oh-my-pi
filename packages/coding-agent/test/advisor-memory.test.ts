@@ -21,7 +21,7 @@ describe("advisor memory context", () => {
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -131,6 +131,7 @@ describe("advisor memory context", () => {
 			const memoryRoot = getMemoryRoot(tempDir.path(), tempDir.path());
 			await fs.mkdir(memoryRoot, { recursive: true });
 			await Bun.write(`${memoryRoot}/memory_summary.md`, "Advisor project summary marker.\n");
+
 			session = await createAdvisedSession(backend, SessionManager.inMemory(tempDir.path()));
 			expect(session.sessionFile).toBeUndefined();
 			const advisor = session.getAdvisorAgent();
@@ -148,9 +149,13 @@ describe("advisor memory context", () => {
 					pattern: "Advisor project summary marker",
 				}),
 			).rejects.toThrow(unavailableRoot);
-			for (const path of ["memory://root", "memory://root/*.md"]) {
-				await expect(glob.execute("advisor-root-glob", { path })).rejects.toThrow(unavailableRoot);
-			}
+			// glob only locates: the backend-bound root has no local file behind it.
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root" })).rejects.toThrow(
+				"no local file backs memory://root",
+			);
+			await expect(glob.execute("advisor-root-glob", { path: "memory://root/*.md" })).rejects.toThrow(
+				"Glob patterns are not supported for internal URLs: memory://root/*.md",
+			);
 
 			if (backend === "mnemopi") {
 				for (let attempt = 0; !session.getMnemopiSessionState() && attempt < 100; attempt++) {

@@ -1,213 +1,78 @@
 /**
  * Credential storage for API keys and OAuth tokens.
- * Handles loading, saving, refreshing credentials, and usage tracking.
  *
- * This module defines:
- * - `AuthCredentialStore` interface: persistence abstraction (SQLite, remote vault, …)
- * - `AuthStorage` class: credential management with round-robin, usage limits, OAuth refresh
- * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
+ * {@link AuthStorage} composes the credential modules under `./auth/` over one
+ * {@link AuthCredentialStore} and exposes them as namespaces:
+ * - `credentials` — stored rows, reload/poll, change and disable events, broker snapshot
+ * - `keys` — the provider auth cascade (runtime → config → OAuth → login key → env → stored key)
+ * - `oauth` — login, per-account access resolution, account listings, refresh
+ * - `sessions` — session → account pins
+ * - `usage` — usage reports, header ingestion, history
+ * - `health` — model pool health and per-credential auth probes
+ * - `limits` — usage-limit marking and credential rotation
+ * - `resets` — saved rate-limit resets
+ * - `blocks` — persisted rate-limit blocks (auth-broker server seam)
+ *
+ * @example
+ * const auth = await AuthStorage.create(getAgentDbPath());
+ * await auth.credentials.reload();
+ * const apiKey = await auth.keys.get("anthropic", sessionId, { modelId });
  */
-import { createHash } from "node:crypto";
-import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
-import {
-	isSqliteCorruptionError,
-	resolveCredentialIdentityKey,
-	SqliteAuthCredentialStore,
-	serializeCredential,
-	USAGE_REPORT_TTL_MS,
-} from "./auth/sqlite-credential-store";
-import type { ApiKeyResolver } from "./auth-retry";
-import * as AIError from "./error";
-import { isUsageLimitOutcome } from "./error/rate-limit";
-import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
-import { getOAuthApiKey, getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "./registry/oauth";
+import { logger } from "@oh-my-pi/pi-utils";
+import { SessionAffinity } from "./auth/affinity";
+import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
+import { KeyCascade, KeyOverrides } from "./auth/cascade";
+import { CredentialHealth } from "./auth/health";
+import { OAuthAccounts } from "./auth/oauth";
+import { AccountPolicies } from "./auth/policy";
+import { CredentialPool } from "./auth/pool";
+import { OAuthRefresher } from "./auth/refresh";
+import { ResetCredits } from "./auth/resets";
+import { RateLimits } from "./auth/rotation";
+import { CredentialSelector } from "./auth/select";
+import { SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+import type { AuthCredentialStore } from "./auth/store";
 import type {
-	OAuthAuthInfo,
-	OAuthController,
-	OAuthCredentials,
-	OAuthPrompt,
-	OAuthProvider,
-	OAuthProviderId,
-} from "./registry/oauth/types";
-import { AUTHENTICATED_SENTINEL } from "./registry/types";
-import { getEnvApiKey, getEnvApiKeyName } from "./stream";
-import { extractProviderRetryHint } from "./utils/retry-after";
-import type { Provider } from "./types";
-import type {
-	ClientUsageIdentity,
-	ClientUsageReport,
-	ClientUsageSummary,
-	CredentialRankingContext,
-	CredentialRankingStrategy,
-	ObservedUsageEntry,
-	UsageCredential,
-	UsageFetchContext,
-	UsageFetchParams,
-	UsageHistoryEntry,
-	UsageHistoryQuery,
-	UsageLimit,
-	UsageLogger,
-	UsageProvider,
-	UsageReport,
-} from "./usage";
-import { resolveUsedFraction } from "./usage";
-import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
-import { charmHyperUsageProvider } from "./usage/charm-hyper";
-import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
-import { clinePassUsageProvider } from "./usage/cline-pass";
-import { cursorUsageProvider } from "./usage/cursor";
-import { devinUsageProvider } from "./usage/devin";
-import { googleGeminiCliUsageProvider } from "./usage/gemini";
-import { githubCopilotUsageProvider } from "./usage/github-copilot";
-import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
-import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
-import { museCodeUsageProvider } from "./usage/muse-code";
-import { minimaxCodeUsageProvider } from "./usage/minimax-code";
-import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
-import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
-import {
-	type CodexResetConsumeCode,
-	type CodexResetCredit,
-	consumeCodexResetCredit,
-	listCodexResetCredits,
-	pickSoonestExpiringCredit,
-} from "./usage/openai-codex-reset";
-import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./usage/opencode-go";
-import { syntheticUsageProvider } from "./usage/synthetic";
-import { umansUsageProvider } from "./usage/umans";
-import { xaiOauthUsageProvider } from "./usage/xai-oauth";
-import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
+	AuthAccountPolicies,
+	AuthApiKeyOptions,
+	AuthCredential,
+	AuthStorageOptions,
+	BlocksApi,
+	CredentialsApi,
+	HealthApi,
+	KeysApi,
+	LimitsApi,
+	OAuthApi,
+	ResetsApi,
+	SessionsApi,
+	UsageApi,
+} from "./auth/types";
+import { UsageService } from "./auth/usage";
+import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache";
+import type { UsageLogger } from "./usage";
+import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
+export * from "./auth/store";
+export * from "./auth/types";
 
-const USAGE_RANKING_METRIC_EPSILON = 1e-9;
-/**
- * Primary (short, e.g. 5h) window used-fraction at or above which a candidate
- * is demoted behind cooler siblings during ranking: a nearly exhausted short
- * window means an imminent mid-session block, so drain urgency defers to it.
- */
-const PRIMARY_WINDOW_HOT_FRACTION = 0.85;
-const OAUTH_BEARER_FINGERPRINT_HISTORY_LIMIT = 8;
-
-/** SHA-256 bearer fingerprint, so superseded OAuth token bytes never enter the identity cache. */
-function fingerprintOAuthBearer(bearer: string): string {
-	return createHash("sha256").update(bearer).digest("base64url");
-}
-const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
-/**
- * Anthropic-only idle window after which a session's pinned credential no
- * longer suppresses usage-based re-ranking. Anthropic caps OAuth prompt-cache
- * retention at `ttl: "1h"` (ephemeral ~5min otherwise), so after this long
- * without an Anthropic resolve the conversation-prefix cache is no longer
- * guaranteed warm. Other providers retain indefinite stickiness until their
- * own cache lifetimes are verified.
- */
-const ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS = 60 * 60_000;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Credential Types
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type ApiKeyCredential = {
-	type: "api_key";
-	key: string;
-	source?: "login";
-};
-
-export type OAuthCredential = {
-	type: "oauth";
-} & OAuthCredentials;
-
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
-
-export type AuthCredentialEntry = AuthCredential | AuthCredential[];
-
-export type AuthStorageData = Record<string, AuthCredentialEntry>;
-
-/**
- * Cascade leg that supplies a provider's active credential, highest precedence
- * first — mirrors {@link AuthStorage.getApiKey}'s resolution order.
- */
-export type CredentialOriginKind = "runtime" | "config" | "oauth" | "api_key" | "env" | "fallback";
-
-/**
- * Structured provenance for a provider's auth, for UI that needs a machine
- * tag (the `/login` provider list) rather than the prose of
- * {@link AuthStorage.describeCredentialSource}.
- */
-export interface CredentialOrigin {
-	kind: CredentialOriginKind;
-	/** Env var name when `kind === "env"` and a single named variable backs it. */
-	envVar?: string;
+/** Store-bound credential modules; rebuilt as a unit by {@link AuthStorage.replaceStore}. */
+interface AuthStorageModules {
+	pool: CredentialPool;
+	keys: KeyCascade;
+	oauth: OAuthAccounts;
+	sessions: SessionAffinity;
+	usage: UsageService;
+	health: CredentialHealth;
+	limits: RateLimits;
+	resets: ResetCredits;
+	blocks: CredentialBlocks;
 }
 
 /**
- * Serialized representation of AuthStorage for passing to subagent workers.
- * Contains only the essential credential data, not runtime state.
- */
-export interface SerializedAuthStorage {
-	credentials: Record<
-		string,
-		Array<{
-			id: number;
-			type: "api_key" | "oauth";
-			data: Record<string, unknown>;
-		}>
-	>;
-	runtimeOverrides?: Record<string, string>;
-	dbPath?: string;
-}
-
-/**
- * Auth credential with database row ID for updates/deletes.
- * Wraps AuthCredential with storage metadata.
- */
-export interface StoredAuthCredential {
-	id: number;
-	provider: string;
-	credential: AuthCredential;
-	disabledCause: string | null;
-}
-
-/** One persisted rate-limit block: credential row id + provider-type key + optional scope. */
-export interface StoredCredentialBlock {
-	/** SQLite row id of the credential (auth_credentials.id). */
-	credentialId: number;
-	/** `${provider}:${credentialType}` — same value as AuthStorage's in-memory providerKey. */
-	providerKey: string;
-	/** Block scope (e.g. "tier:fable"); empty string = unscoped. Never NUL-delimited. */
-	blockScope: string;
-	/** Epoch milliseconds. */
-	blockedUntilMs: number;
-	/** Last row update timestamp in epoch milliseconds, when provided by the backing store. */
-	updatedAtMs?: number;
-}
-
-/**
- * Identity slice of a disabled (soft-deleted) credential tombstone — cause and
- * account identity only, never token material. Surfaced so auto-disabled
- * accounts (e.g. an expired Anthropic OAuth grant) stay visible in `omp usage`
- * instead of silently vanishing until the user notices missing quota.
- */
-export interface DisabledCredentialSummary {
-	/** Database row id (matches {@link StoredAuthCredential.id}). */
-	id: number;
-	provider: string;
-	type: AuthCredential["type"];
-	email?: string;
-	accountId?: string;
-	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
-	orgId?: string;
-	orgName?: string;
-	/** Verbatim disable cause captured when the row was torn down. */
-	cause: string;
-	/** Epoch ms the row was disabled (SQLite `updated_at`), when known. */
-	disabledAtMs?: number;
-}
-
-/**
- * Per-credential health record returned by {@link AuthStorage.checkCredentials}.
+ * Credential management over an {@link AuthCredentialStore}: multi-account
+ * selection with usage-aware ranking, rate-limit blocks, OAuth refresh, and
+ * usage reporting. See the module doc for the namespace layout.
  *
  * Use this to identify which credential in a multi-account pool is causing
  * auth errors. `ok` is tri-state:
@@ -1359,131 +1224,183 @@ type RankedApiKeyCandidate = UsageRankedCandidate<ApiKeyCredential>;
  * usage limit tracking, and OAuth token refresh.
  */
 export class AuthStorage {
-	static readonly #defaultBackoffMs = 60_000; // Default backoff when no reset time available
-
-	/** Provider -> credentials cache, populated from store on reload(). */
-	#data: Map<string, StoredCredential[]> = new Map();
-	#runtimeOverrides: Map<string, string> = new Map();
-	#configOverrides: Map<string, string> = new Map();
-	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
-	#providerRoundRobinIndex: Map<string, number> = new Map();
-	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<
-		string,
-		Map<string, { type: AuthCredential["type"]; index: number; credentialId?: number; lastUsedAtMs?: number }>
-	> = new Map();
-	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
-	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
-	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
-	#credentialBackoff: Map<string, Map<number, number>> = new Map();
-	/**
-	 * Provenance of each in-memory block: `true` when the deadline came from
-	 * provider-stated timing (a parsed retry hint or a usage-report reset),
-	 * `false` when it is a heuristic/default guess. Mirrors
-	 * {@link AuthStorage.#credentialBackoff} longest-wins semantics, tracking
-	 * the flag of whichever deadline currently wins.
-	 */
-	#credentialBackoffProviderTimed: Map<string, Map<number, boolean>> = new Map();
-	/** Earliest time a freshly-set in-memory block may be cleared by live usage reconciliation. */
-	#credentialBackoffProbeAfter: Map<string, Map<number, number>> = new Map();
-	/**
-	 * Latched true once the persistent credential-block store reports an
-	 * unrecoverable error (SQLite corruption / not-a-database). While set, every
-	 * persisted-block read and write short-circuits for the life of the process:
-	 * availability is preserved through {@link AuthStorage.#credentialBackoff}, but
-	 * cross-process persistence is abandoned rather than re-querying a broken store
-	 * on every credential evaluation.
-	 */
-	#persistedBlockStoreDamaged = false;
-	#usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
-	/** Runtime extension providers take precedence over this configured/default resolver. */
-	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
-	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
-	#rankingStrategyResolver?: (provider: Provider) => CredentialRankingStrategy | undefined;
-	#usageCache: UsageCache;
-	#usageCacheEpoch = 0;
-	#usageRequestInFlight: Map<string, Promise<UsageReport | null>> = new Map();
-	#usageHeaderIngestAt: Map<string, number> = new Map();
-	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
-	#usageFetch: typeof fetch;
-	#usageRequestTimeoutMs: number;
-	#usageLogger?: UsageLogger;
-	#fallbackResolver?: (provider: string) => string | undefined;
-	#store: AuthCredentialStore;
-	#configValueResolver: (config: string) => Promise<string | undefined>;
-	#refreshOAuthCredentialOverride?: AuthStorageOptions["refreshOAuthCredential"];
-	#fetchUsageReportsOverride?: AuthStorageOptions["fetchUsageReports"];
-	#sourceLabel?: string;
-	#credentialDisabledListeners: Set<(event: CredentialDisabledEvent) => void | Promise<void>> = new Set();
-	/**
-	 * Buffer for credential_disabled events fired while no listener is subscribed.
-	 * Drained (in insertion order) to the first listener that triggers the empty→non-empty
-	 * transition via {@link AuthStorage.onCredentialDisabled}. Bounded at
-	 * {@link MAX_PENDING_DISABLED_EVENTS}; oldest entries are dropped to keep memory predictable
-	 * if a long-lived AuthStorage somehow accumulates a backlog (provider count is naturally small,
-	 * but a process that runs without subscribers for a long time shouldn't grow this unboundedly).
-	 */
-	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
-	#generation = 1;
-	#generationListeners: Set<(generation: number) => void> = new Set();
-	#oauthRefreshInFlight: Map<number, Promise<AuthCredentialSnapshotEntry>> = new Map();
-	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
-	#closed = false;
+	readonly #options: AuthStorageOptions;
+	readonly #overrides: KeyOverrides;
+	readonly #policies: AccountPolicies;
+	#modules: AuthStorageModules;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
-		this.#store = store;
-		this.#configValueResolver = options.configValueResolver ?? defaultConfigValueResolver;
-		this.#usageProviderResolver = options.usageProviderResolver ?? resolveDefaultUsageProvider;
-		this.#rankingStrategyResolver = options.rankingStrategyResolver ?? resolveDefaultRankingStrategy;
-		this.#usageCache = new AuthStorageUsageCache(this.#store);
-		// Opportunistic hygiene, once per AuthStorage lifetime: drop expired
-		// cache rows (24h last-good retention). A cheap indexed DELETE;
-		// failures must never block construction.
-		try {
-			this.#store.cleanExpiredCache();
-		} catch {
-			// Best-effort.
-		}
-		try {
-			this.#store.cleanExpiredCredentialBlocks?.(Date.now());
-		} catch (err) {
-			// Best-effort, but init-time corruption must latch the block store
-			// immediately so the first evaluation doesn't re-query a broken DB.
-			this.#handlePersistedBlockStoreError(err);
-		}
-		this.#usageFetch = options.usageFetch ?? fetch;
-		this.#usageRequestTimeoutMs = options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS;
-		this.#refreshOAuthCredentialOverride = options.refreshOAuthCredential;
-		this.#fetchUsageReportsOverride = options.fetchUsageReports;
-		this.#sourceLabel = options.sourceLabel;
-		if (options.onCredentialDisabled) {
-			// Constructor-registered subscribers are permanent for this AuthStorage's lifetime;
-			// the unsubscribe handle is intentionally discarded.
-			this.onCredentialDisabled(options.onCredentialDisabled);
-		}
-		this.#usageLogger =
-			options.usageLogger ??
-			({
-				debug: (message, meta) => logger.debug(message, meta),
-				warn: (message, meta) => logger.warn(message, meta),
-			} satisfies UsageLogger);
+		this.#options = options;
+		this.#overrides = new KeyOverrides(options.configValueResolver);
+		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#modules = this.#compose(store, options.sourceLabel);
+		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
+	}
+
+	/** Stored credential rows, change/disable events, broker snapshot. */
+	get credentials(): CredentialsApi {
+		return this.#modules.pool;
+	}
+	/** Provider auth cascade and key overrides. */
+	get keys(): KeysApi {
+		return this.#modules.keys;
+	}
+	/** OAuth login, account access, listings, refresh. */
+	get oauth(): OAuthApi {
+		return this.#modules.oauth;
+	}
+	/** Session → account pins. */
+	get sessions(): SessionsApi {
+		return this.#modules.sessions;
+	}
+	/** Usage reports, header ingestion, history. */
+	get usage(): UsageApi {
+		return this.#modules.usage;
+	}
+	/** Model pool health and per-credential probes. */
+	get health(): HealthApi {
+		return this.#modules.health;
+	}
+	/** Usage-limit marking and credential rotation. */
+	get limits(): LimitsApi {
+		return this.#modules.limits;
+	}
+	/** Saved rate-limit resets. */
+	get resets(): ResetsApi {
+		return this.#modules.resets;
+	}
+	/** Persisted rate-limit blocks (auth-broker server seam). */
+	get blocks(): BlocksApi {
+		return this.#modules.blocks;
 	}
 
 	/**
-	 * Create an AuthStorage instance backed by a AuthCredentialStore.
-	 * Convenience factory for standalone use (e.g., pi-ai CLI).
-	 * @param dbPath - Path to SQLite database
+	 * Apply new account routing policy (live `auth.accountPolicies` /
+	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
+	 * active policy untouched, when the policy is malformed or does not match the
+	 * stored OAuth accounts.
 	 */
+	setAccountPolicies(config: { accountPolicies: AuthAccountPolicies; defaultReservePct: number }): void {
+		const pool = this.#modules.pool;
+		const stored = new Map<string, AuthCredential[]>();
+		for (const provider of pool.providers()) stored.set(provider, pool.credentials(provider));
+		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
+	}
+
+	/**
+	 * Swap the backing credential store in place (live `auth.broker.url` change).
+	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
+	 * keyed by the old store's row ids — then closes the previous store. Runtime key
+	 * overrides, account policies, usage-provider overrides, and credential event
+	 * subscribers carry over. On a load failure `store` is closed and the current
+	 * store stays active.
+	 */
+	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
+		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		try {
+			await next.pool.reload();
+		} catch (error) {
+			next.pool.close();
+			throw error;
+		}
+		const previous = this.#modules;
+		next.pool.adoptSubscribers(previous.pool);
+		next.usage.adoptRuntimeProviders(previous.usage);
+		this.#modules = next;
+		previous.pool.close();
+		next.pool.bump("store-replaced");
+	}
+
+	#compose(store: AuthCredentialStore, sourceLabel: string | undefined): AuthStorageModules {
+		const options = this.#options;
+		const overrides = this.#overrides;
+		const policies = this.#policies;
+		const blockHealth = new BlockStoreHealth(sourceLabel);
+		const strategies = options.rankingStrategyResolver ?? defaultRankingStrategy;
+		const pool = new CredentialPool(store, {
+			policies,
+			blockHealth,
+			onReset: provider => {
+				selector.resetRoundRobin(provider);
+				affinity.clearProvider(provider);
+			},
+		});
+		const refresher = new OAuthRefresher({ store, pool, policies, override: options.refreshOAuthCredential });
+		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
+		const usageCache = new UsageCache(store, pool, usageProviders);
+		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
+		const affinity = new SessionAffinity(store, pool, overrides);
+		const usage = new UsageService({
+			store,
+			pool,
+			overrides,
+			refresher,
+			cache: usageCache,
+			blocks,
+			affinity,
+			strategies,
+			usageProviders,
+			fetch: options.usageFetch ?? fetch,
+			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
+			logger:
+				options.usageLogger ??
+				({
+					debug: (message, meta) => logger.debug(message, meta),
+					warn: (message, meta) => logger.warn(message, meta),
+				} satisfies UsageLogger),
+		});
+		const selector = new CredentialSelector({
+			store,
+			pool,
+			policies,
+			blocks,
+			affinity,
+			usage,
+			refresher,
+			strategies,
+		});
+		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
+		const keys = new KeyCascade({
+			pool,
+			overrides,
+			selector,
+			affinity,
+			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
+			sourceLabel,
+		});
+		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });
+
+		return {
+			pool,
+			keys,
+			oauth,
+			sessions: affinity,
+			usage,
+			health: new CredentialHealth({
+				store,
+				pool,
+				keys,
+				policies,
+				blocks,
+				affinity,
+				usage,
+				refresher,
+				overrides,
+				strategies,
+			}),
+			limits,
+			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+			blocks,
+		};
+	}
+
+	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		return new AuthStorage(store, options);
 	}
 
-	/**
-	 * Close the underlying credential store.
-	 *
-	 * After calling this, the instance must not be reused.
-	 */
+	/** Close the underlying credential store; the instance must not be reused. */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
@@ -7362,154 +7279,18 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Upsert a credential into the underlying store, refresh the in-memory
-	 * snapshot, and return the redacted snapshot entries for the provider.
-	 *
-	 * Used by the auth-broker server to honour `POST /v1/credential`. The
-	 * persistence layer (`SqliteAuthCredentialStore.upsertAuthCredentialForProvider`)
-	 * does identity-key matching, so re-uploading the same email/account replaces
-	 * the existing row instead of inserting a duplicate.
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.keys}`.get`.
 	 */
-	upsertCredential(provider: string, credential: AuthCredential): AuthCredentialSnapshotEntry[] {
-		const stored = this.#store.upsertAuthCredentialForProvider(provider, credential);
-		this.#setStoredCredentials(
-			provider,
-			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
-		);
-		this.#resetProviderAssignments(provider);
-		return stored.map(entry => {
-			const persisted = entry.credential;
-			const redacted: SnapshotCredential =
-				persisted.type === "api_key" ? persisted : { ...persisted, refresh: REMOTE_REFRESH_SENTINEL };
-			return {
-				id: entry.id,
-				provider: entry.provider,
-				credential: redacted,
-				identityKey: resolveCredentialIdentityKey(provider, persisted),
-			};
-		});
+	getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		return this.keys.get(provider, sessionId, options);
 	}
 
 	/**
-	 * Broker-server seam: list non-expired persisted blocks for snapshot entries.
+	 * Legacy redirect for callers of the pre-namespace flat API (e.g. repo scripts).
+	 * @deprecated Use {@link AuthStorage.credentials}`.reload`.
 	 */
-	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
-		if (this.#persistedBlockStoreDamaged) return [];
-		const listCredentialBlocks = this.#store.listCredentialBlocks?.bind(this.#store);
-		if (!listCredentialBlocks) return [];
-		try {
-			return listCredentialBlocks(credentialIds);
-		} catch (err) {
-			if (this.#handlePersistedBlockStoreError(err)) return [];
-			throw err;
-		}
-	}
-
-	/**
-	 * Broker-server seam: persist one credential block and notify snapshot waiters.
-	 */
-	upsertCredentialBlock(block: StoredCredentialBlock): void {
-		this.#assertPersistedBlockStoreWritable();
-		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
-		if (!upsertCredentialBlock) return;
-		try {
-			upsertCredentialBlock(block);
-		} catch (err) {
-			if (this.#handlePersistedBlockStoreError(err)) this.#assertPersistedBlockStoreWritable();
-			throw err;
-		}
-		this.#invalidateUsageReportCacheForProviderKey(block.providerKey);
-		this.#bumpGeneration("credential-block");
-	}
-
-	/**
-	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
-	 */
-	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
-		this.#assertPersistedBlockStoreWritable();
-		const deleteCredentialBlock = this.#store.deleteCredentialBlock?.bind(this.#store);
-		if (!deleteCredentialBlock) return;
-		try {
-			deleteCredentialBlock(credentialId, providerKey, blockScope);
-		} catch (err) {
-			if (this.#handlePersistedBlockStoreError(err)) this.#assertPersistedBlockStoreWritable();
-			throw err;
-		}
-		this.#invalidateUsageReportCacheForProviderKey(providerKey);
-		this.#bumpGeneration("credential-block");
-	}
-
-	deleteCredentialBlocks(credentialId: number): void {
-		this.#assertPersistedBlockStoreWritable();
-		const deleteCredentialBlocks = this.#store.deleteCredentialBlocks?.bind(this.#store);
-		if (!deleteCredentialBlocks) return;
-		try {
-			deleteCredentialBlocks(credentialId);
-		} catch (err) {
-			if (this.#handlePersistedBlockStoreError(err)) this.#assertPersistedBlockStoreWritable();
-			throw err;
-		}
-		this.#bumpGeneration("credential-block");
-	}
-
-	/**
-	 * Describe where the active credential for a provider came from.
-	 *
-	 * Mirrors {@link AuthStorage.getApiKey} precedence, highest first:
-	 *   1. Runtime override (`--api-key`).
-	 *   2. Config override (`models.yml` `providers.<name>.apiKey`).
-	 *   3. Stored OAuth credential.
-	 *   4. API key persisted by a successful `/login`.
-	 *   5. Env var — overrides a stored static api_key (e.g. a stale broker copy).
-	 *   6. Stored api_key credential.
-	 *   7. Fallback resolver.
-	 *
-	 * The string is purely informational; consumers must not parse it.
-	 */
-	describeCredentialSource(provider: string, sessionId?: string): string | undefined {
-		if (this.#runtimeOverrides.has(provider)) {
-			return "runtime override (--api-key)";
-		}
-		if (this.#configOverrides.has(provider)) {
-			return "config override (models.yml)";
-		}
-
-		const baseLabel = this.#sourceLabel ?? "local store";
-		const stored = this.#getStoredCredentials(provider);
-		const session = sessionId ? this.#sessionLastCredential.get(provider)?.get(sessionId) : undefined;
-		const describeStored = (
-			type: AuthCredential["type"],
-			filter?: (credential: AuthCredential) => boolean,
-		): string | undefined => {
-			const typed = stored
-				.map((entry, index) => ({ entry, index }))
-				.filter(({ entry }) => entry.credential.type === type && (filter?.(entry.credential) ?? true));
-			if (typed.length === 0) return undefined;
-			const sticky = session?.type === type ? typed.find(entry => entry.index === session.index) : undefined;
-			const chosen = sticky?.entry ?? typed[0].entry;
-			const credential = chosen.credential;
-			const identity =
-				credential.type === "oauth"
-					? (credential.email ?? credential.accountId ?? credential.projectId ?? `cred ${chosen.id}`)
-					: `cred ${chosen.id}`;
-			return `${baseLabel} · ${type} #${chosen.id} (${identity})`;
-		};
-
-		// Deliberate login credentials win; then an explicit env var; then a stored static api_key.
-		const oauthSource = describeStored("oauth");
-		if (oauthSource) return oauthSource;
-		const loginApiKeySource = describeStored(
-			"api_key",
-			credential => credential.type === "api_key" && credential.source === "login",
-		);
-		if (loginApiKeySource) return loginApiKeySource;
-		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;
-		const apiKeySource = describeStored(
-			"api_key",
-			credential => credential.type !== "api_key" || credential.source !== "login",
-		);
-		if (apiKeySource) return apiKeySource;
-		if (this.#fallbackResolver?.(provider) !== undefined) return "fallback resolver";
-		return undefined;
+	reload(): Promise<void> {
+		return this.credentials.reload();
 	}
 }

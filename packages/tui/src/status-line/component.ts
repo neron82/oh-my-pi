@@ -35,6 +35,7 @@ import {
 	detectCodexResetFireworks,
 } from "../overlays/codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
@@ -54,6 +55,18 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
+
+/**
+ * Providers whose subscription quota is a single monthly bucket, so their
+ * `monthly`/`30d` window is the one the usage segment must show. Providers that
+ * merely report a monthly side-counter (GitHub Copilot's premium requests) stay
+ * out: their monthly row is not the session quota.
+ */
+const MONTHLY_SUBSCRIPTION_PROVIDERS: Record<string, true> = {
+	"alibaba-token-plan": true,
+	cursor: true,
+	"opencode-go": true,
+};
 
 /** A displayable limit after provider, account, model, and window filtering. */
 interface UsageWindowCandidate {
@@ -80,7 +93,7 @@ function normalizeUsageScopeValue(value: unknown): string | undefined {
  * be present and equal or a workspace sibling can mutate this account's
  * baseline.
  */
-function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
+function reportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
 	const accountId = normalizeUsageScopeValue(identity.accountId);
 	const email = normalizeUsageScopeValue(identity.email);
@@ -536,6 +549,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
+	#recording = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -575,6 +589,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
@@ -927,6 +948,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Toggle the `● REC` badge shown while `/record` captures the screen. */
+	setRecording(recording: boolean): void {
+		if (this.#recording === recording) return;
+		this.#recording = recording;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -1764,7 +1792,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// The report boundary above validates the fields this extractor iterates;
 			// optional metadata and credit fields are narrowed again before use.
 			const usageReport = report as UsageReport;
-			if (!codexReportMatchesExactIdentity(usageReport, activeIdentity)) continue;
+			if (!reportMatchesExactIdentity(usageReport, activeIdentity)) continue;
 			matchingReport = usageReport;
 			break;
 		}
@@ -1820,12 +1848,22 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
+		resetCredits?: {
+			bankedCount: number;
+			redeemableCount: number;
+			expiryHours?: number;
+			expired?: boolean;
+			unavailableReason?: string;
+		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		const now = Date.now();
+		const resetReports: UsageReport[] = [];
 		const activeModelId = normalizeUsageScopeValue(context.modelId);
 		const activeAntigravityCounter =
 			context.provider === "google-antigravity" ? getAntigravityCounterKeyForModel(context.modelId) : undefined;
+		const monthlySubscriptionProvider =
+			context.provider !== undefined && MONTHLY_SUBSCRIPTION_PROVIDERS[context.provider] === true;
 		const scopeGroups = new Map<string, UsageScopeGroup>();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
@@ -1836,6 +1874,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			// fetchUsageReports supplies normalized rows; the guards above protect
 			// the unknown session boundary before the account matcher reads metadata.
 			const usageReport = report as UsageReport;
+			if (
+				usageReport.resetCredits &&
+				(!context.identity || reportMatchesExactIdentity(usageReport, context.identity))
+			) {
+				resetReports.push(usageReport);
+			}
 			const limits =
 				provider === "google-antigravity" && activeAntigravityCounter
 					? scopeAntigravityLimitsForModel(usageReport, context)
@@ -1882,10 +1926,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 										: undefined;
 				const windowClass =
 					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-						? "monthly"
-						: undefined);
+					(monthlySubscriptionProvider && (windowId === "monthly" || windowId === "30d") ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
@@ -1923,7 +1964,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		for (const group of scopeGroups.values()) {
 			if (!selectedGroup || group.priority < selectedGroup.priority) selectedGroup = group;
 		}
-		if (!selectedGroup) return null;
+		const resetReport =
+			resetReports.length === 1
+				? resetReports[0]
+				: context.identity
+					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
+					: undefined;
+		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
+		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const resetCredits =
+			resetSummary && resetSummary.bankedCount > 0
+				? {
+						bankedCount: resetSummary.bankedCount,
+						redeemableCount: resetSummary.redeemableCount,
+						expiryHours:
+							resetExpiryMs !== undefined && resetExpiryMs > 0
+								? Math.max(1, Math.ceil(resetExpiryMs / 3_600_000))
+								: undefined,
+						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
+						unavailableReason: resetSummary.unavailableReason,
+					}
+				: undefined;
+		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
 
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let daily: { percent: number; resetMinutes?: number } | undefined;
@@ -1980,8 +2042,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				}
 			}
 		}
-		if (!fiveHour && !daily && !sevenDay && !monthly) return null;
-		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly };
+		if (!fiveHour && !daily && !sevenDay && !monthly && !resetCredits) return null;
+		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly, resetCredits };
 	}
 
 	/**
@@ -2139,6 +2201,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
 			stream: this.#streamStatus,
+			recording: this.#recording,
 			usageStats,
 			contextPercent,
 			contextTokens,

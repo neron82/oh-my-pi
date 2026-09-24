@@ -26,6 +26,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -68,7 +69,14 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
-import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
+import {
+	filterSessionsForPicker,
+	findMostRecentNonEmptySession,
+	isEmptySession,
+	listAllSessions,
+	listSessions,
+	type SessionInfo,
+} from "./session-listing";
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
@@ -99,7 +107,7 @@ import {
 	normalizeSessionWorkspace,
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
-import { recordSessionTitle } from "./title-index";
+import { recordSessionRecap, recordSessionTitle } from "./session-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -221,7 +229,17 @@ async function mergeDirectoryInto(
 			if (id !== undefined) ({ occupants, takenIds } = await destinationOccupancy(destination));
 			const occupant = occupants.get(entry.name);
 			if (occupant === undefined && (id === undefined || !takenIds.has(id))) {
-				await moveEntryWithoutReplacing(from, to, entry.isDirectory());
+				if (entry.isDirectory()) {
+					try {
+						await moveEntryWithoutReplacing(from, to, true);
+					} catch (err) {
+						if (!isFsError(err) || err.code !== "EXDEV") throw err;
+						await fs.promises.mkdir(to);
+						await mergeDirectoryInto(from, to, stranded, `${label}/`);
+					}
+				} else {
+					await moveEntryWithoutReplacing(from, to, false);
+				}
 			} else if (occupant?.isDirectory() && entry.isDirectory()) {
 				await mergeDirectoryInto(from, to, stranded, `${label}/`);
 			} else {
@@ -280,7 +298,11 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
 			}),
 			fs.promises.lstat(source),
 		]);
-		if (occupant === null || !occupant.isDirectory() || !origin.isDirectory()) throw err;
+		if (occupant === null && origin.isDirectory() && isFsError(err) && err.code === "EXDEV") {
+			await fs.promises.mkdir(destination);
+		} else if (occupant === null || !occupant.isDirectory() || !origin.isDirectory()) {
+			throw err;
+		}
 	}
 	const stranded = await mergeDirectoryInto(source, destination);
 	if (stranded.length > 0) {
@@ -768,7 +790,7 @@ export class SessionManager {
 	 * once rename has landed (source gone). Never recreates a vacated source.
 	 * `null` outside an active relocation.
 	 */
-	#sessionFileRelocating: { source: string; dest: string } | null = null;
+	#sessionFileRelocating: { source: string; dest: string; copying?: boolean } | null = null;
 	/** Atomic entry batch currently staged for a full-file commit. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
 
@@ -1125,6 +1147,7 @@ export class SessionManager {
 	#liveRelocationWritePath(): string | null {
 		const relocating = this.#sessionFileRelocating;
 		if (!relocating) return null;
+		if (relocating.copying && this.#storage.existsSync(relocating.source)) return relocating.source;
 		if (this.#storage.existsSync(relocating.dest)) return relocating.dest;
 		if (this.#storage.existsSync(relocating.source)) return relocating.source;
 		// Rename in flight with neither path visible (rare cross-device edge):
@@ -1470,6 +1493,10 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
+		if (options?.sessionDir && this.#persist) {
+			this.#sessionDir = path.resolve(options.sessionDir);
+			this.#storage.ensureDirSync(this.#sessionDir);
+		}
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -1986,7 +2013,13 @@ export class SessionManager {
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
-						await fs.promises.rename(oldSessionFile, newSessionFile);
+						try {
+							await fs.promises.rename(oldSessionFile, newSessionFile);
+						} catch (error) {
+							if (!isFsError(error) || error.code !== "EXDEV") throw error;
+							if (this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+							await moveFileAcrossDevices(oldSessionFile, newSessionFile);
+						}
 						sessionMoved = true;
 					}
 
@@ -2017,7 +2050,12 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							await fs.promises.rename(newSessionFile, oldSessionFile);
+							try {
+								await fs.promises.rename(newSessionFile, oldSessionFile);
+							} catch (error) {
+								if (!isFsError(error) || error.code !== "EXDEV") throw error;
+								await moveFileAcrossDevices(newSessionFile, oldSessionFile);
+							}
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
@@ -2695,6 +2733,16 @@ export class SessionManager {
 	}
 
 	/**
+	 * Journal an idle recap for this session in history.db. Recaps never enter
+	 * the session file or LLM context; in-memory sessions are not journaled.
+	 */
+	recordRecap(recap: string): void {
+		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+			recordSessionRecap(this.#sessionId, this.#cwd, recap);
+		}
+	}
+
+	/**
 	 * Append a foreign (host-authored) entry verbatim, preserving its
 	 * `id`/`parentId`. Used by collab guests to mirror the host session.
 	 */
@@ -2850,6 +2898,7 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 		isolated?: boolean;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
@@ -3578,7 +3627,6 @@ export class SessionManager {
 		if (!header) return null;
 		return { cwd: header.cwd ?? getProjectDir(), init: extractSessionInit(initEntries) };
 	}
-
 	/** Continue the most recent session, or create a new one if none exists. */
 	static async continueRecent(
 		cwd: string,
@@ -3622,7 +3670,7 @@ export class SessionManager {
 				// When an explicit sessionDir is reused across the move, the stale
 				// breadcrumb file may be the newest entry there; prefer a genuine
 				// current-cwd session.
-				let newestInTargetDir = await findMostRecentSession(dir, storage);
+				let newestInTargetDir = await findMostRecentNonEmptySession(dir, storage);
 				const breadcrumbFile = path.resolve(breadcrumb.sessionFile);
 				const breadcrumbCwdMissing = !fs.existsSync(breadcrumbCwd);
 				const newestIsBreadcrumb = newestInTargetDir ? path.resolve(newestInTargetDir) === breadcrumbFile : false;
@@ -3633,7 +3681,8 @@ export class SessionManager {
 						session =>
 							path.resolve(session.path) !== breadcrumbFile &&
 							session.cwd &&
-							path.resolve(session.cwd) === resolvedCwd,
+							path.resolve(session.cwd) === resolvedCwd &&
+							!isEmptySession(session),
 					);
 					if (localSession) {
 						newestInTargetDir = localSession.path;
@@ -3672,7 +3721,7 @@ export class SessionManager {
 			}
 		}
 
-		if (chosenSession === undefined) chosenSession = await findMostRecentSession(dir, storage);
+		if (chosenSession === undefined) chosenSession = await findMostRecentNonEmptySession(dir, storage);
 
 		const manager = new SessionManager(cwd, dir, true, storage);
 		if (chosenSession) await manager.setSessionFile(chosenSession);
@@ -3709,6 +3758,26 @@ export class SessionManager {
 		const sessions = await listAllSessions(storage);
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
+
+	/**
+	 * Picker-facing project list: pinned sessions first, untitled empties
+	 * dropped. Titled empties stay — a title is user intent worth resuming.
+	 */
+	static async listForPicker(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<SessionInfo[]> {
+		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const pinned = await loadPinnedSessionIds();
+		return sortPinnedFirst(filterSessionsForPicker(await listSessions(dir, storage), pinned), pinned);
+	}
+
+	/** Picker-facing cross-project list, same empty-session rule as {@link listForPicker}. */
+	static async listAllForPicker(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
+		const pinned = await loadPinnedSessionIds();
+		return sortPinnedFirst(filterSessionsForPicker(await listAllSessions(storage), pinned), pinned);
+	}
 }
 
 /** True when already-loaded entries carry at least one real user/assistant message. */
@@ -3734,6 +3803,7 @@ export interface PersistedSessionInit {
 	spawns?: string;
 	readSummarize?: boolean;
 	advisor?: string;
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
 	isolated?: boolean;
 }
 
@@ -3760,6 +3830,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			spawns: entry.spawns,
 			advisor: entry.advisor,
 			isolated: entry.isolated,
+			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
 		};
 	}
 	return init;
