@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed image-carrying turns wedging on a local inference backend that dies mid-decode over them (llama.cpp with a speculative draft model fails every request containing an image, including one carrying a snapcompact frame): the session now withdraws image input from that model, so the retry sends the turn without images instead of replaying the same doomed request, and warns that vision stays off until another model is selected.
 ### Added
 
 - Added support for universal (fat) Mach-O binaries in IDA tool, allowing selection of specific architecture slices via the `:@<arch>` syntax
@@ -43,6 +40,8 @@
 - Added Anthropic fallback credit token preservation across same-provider classifier refusal fallbacks, including continuation through signed thinking turns.
 
 ### Fixed
+
+- Fixed image-carrying turns wedging on a local inference backend that dies mid-decode over them (llama.cpp with a speculative draft model fails every request containing an image, including one carrying a snapcompact frame): the session now withdraws image input from that model, so the retry sends the turn without images instead of replaying the same doomed request, and warns that vision stays off until another model is selected.
 
 - Fixed `vault://` paths resolving to a different spelling for bash than for reads on Windows when `TEMP` or the profile directory uses an 8.3 short name like `ADMINI~1` ([#7911](https://github.com/can1357/oh-my-pi/issues/7911), [#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))
 - Fixed the bash tool on Windows keeping 8.3 short-name spellings like `ADMINI~1` in its working directory; `pwd` and `$PWD` now report the long path ([#7938](https://github.com/can1357/oh-my-pi/pull/7938) by [@CoderTCY](https://github.com/CoderTCY))

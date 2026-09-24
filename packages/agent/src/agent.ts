@@ -853,9 +853,9 @@ export class Agent {
 	 * Replay this agent's live request pipeline over `messages` and return the
 	 * exact provider-bound Context the loop would send for them (same
 	 * transformContext → convertToLlm → normalization → provider-transform →
-	 * dialect-encoding order as the live turn). KV-aligned compaction uses this
-	 * to convert the shadowed region so the summarization request stays
-	 * byte-aligned with the last live request (prompt-cache stability).
+	 * dialect encoding → inactive-tool decoration, in the live turn's order.
+	 * KV-aligned compaction uses this to convert the shadowed region so the
+	 * summarization request stays byte-aligned with the last live request.
 	 */
 	async buildProviderContextForMessages(
 		messages: AgentMessage[],
@@ -867,9 +867,11 @@ export class Agent {
 				transformContext: this.#transformContext,
 				convertToLlm: this.#convertToLlm,
 				transformProviderContext: this.#transformProviderContext,
+				sentToolDefinitions: this.#sentToolDefinitions,
 				intentTracing: this.#intentTracing,
 				pruneToolDescriptions: this.#pruneToolDescriptions,
 				dialect: this.#dialect,
+				getDialect: this.#dialectResolver,
 			},
 			this.#state.systemPrompt,
 			this.#toolsForModel(model),

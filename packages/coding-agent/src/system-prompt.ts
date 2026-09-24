@@ -934,12 +934,19 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: toolNames.some(name => toolReadsSkillUris(tools.get(name))) ||
 				xdevTools.some(entry => toolReadsSkillUris(tools.get(entry.name)));
 	const hasSkillUriAccess = hasSkillReader && skills.length > 0;
+	const schemeHost: SchemeHost = {
+		skillUriAccess: hasSkillUriAccess,
+		ruleCount: rules?.length ?? 0,
+		memoryBackend,
+		securityEnabled,
+		experimentalContextManagement,
+	};
 	const visibleSkills = hasSkillReader ? skills.filter(skill => skill.hide !== true) : [];
 	// Sort by name (plain code-unit compare, locale-independent): discovery order
 	// is a filesystem-scan artifact and must not leak into the system prompt —
 	// any reorder between rebuilds would silently invalidate the whole cached
 	// prompt prefix (prompt-cache stability).
-	const filteredSkills = visibleSkills.toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(visibleSkills);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,

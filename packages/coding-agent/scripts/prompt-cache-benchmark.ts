@@ -307,7 +307,7 @@ async function runConfiguration(label: string, setting: "off" | "auto", api: str
 		await fs.writeFile(tempDir.join("README.md"), "# bench fixture\n");
 
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "bench-test-key");
+		authStorage.keys.setRuntime("anthropic", "bench-test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		const model = buildModel({
 			id: "claude-bench",

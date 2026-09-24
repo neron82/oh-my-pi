@@ -722,6 +722,8 @@ export interface SummaryOptions {
 	kvAlignedBaseContext?: {
 		systemPrompt: string[];
 		tools: Tool[];
+		/** Retired Anthropic definitions required to reconstruct declared tool state. */
+		inactiveTools?: Tool[];
 		messages: Message[];
 	};
 	/**
@@ -1735,6 +1737,7 @@ export async function compact(
 		summaryOptions.kvAlignedContext = {
 			systemPrompt: base.systemPrompt,
 			tools: base.tools,
+			inactiveTools: base.inactiveTools,
 			messages: [
 				...base.messages,
 				{

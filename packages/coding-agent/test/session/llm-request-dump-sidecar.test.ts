@@ -50,7 +50,7 @@ function text(content: string): MockResponse {
 async function createSession(): Promise<{ session: AgentSession; mock: MockModel }> {
 	tempDir = TempDir.createSync("@pi-llm-request-dump-");
 	const mock = createMockModel({ responses: [text("ok")] });
-	sharedAuthStorage.setRuntimeApiKey(mock.provider, "test-key");
+	sharedAuthStorage.keys.setRuntime(mock.provider, "test-key");
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,

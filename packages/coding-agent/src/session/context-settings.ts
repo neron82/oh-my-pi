@@ -364,6 +364,19 @@ export const cfgSnapcompactToolResults = register({
 	},
 });
 
+export const cfgSnapcompactMaxFrames = register({
+	id: "snapcompact.maxFrames",
+	type: "number",
+	default: undefined,
+	ui: {
+		tab: "context",
+		group: "Experimental",
+		label: "Snapcompact Max Frames",
+		description:
+			"Hard cap on the image frames a snapcompact compaction archive may attach per request. Clamps the window- and provider-derived frame budget; set to 1 for processors that reject multi-image requests. Unset or 0 keeps the derived budget.",
+	},
+});
+
 export const cfgToolsFormat = register({
 	id: "tools.format",
 	type: "enum",

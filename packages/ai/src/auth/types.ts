@@ -415,6 +415,11 @@ export type AuthStorageOptions = {
  * reset, so sleeping until the latest one can actually clear the account. A
  * permanent cap alongside a timed window (or no report at all) leaves it
  * unset, and the heuristic fallback alone must never authorize a wait.
+ *
+ * `statedResetAtMs` is present whenever at least one exhausted window carries
+ * a future provider-stated reset. It qualifies durable deferred resume even
+ * when another exhausted window has no reset boundary; it does not replace the
+ * complete-report authority required by an in-request wait.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
@@ -425,6 +430,7 @@ export interface UsageLimitMarkResult {
 	priorBlockedUntilMs?: number;
 	priorBlockedUntilTimed?: boolean;
 	reportResetAtMs?: number;
+	statedResetAtMs?: number;
 }
 
 /** Combined model availability state across stored accounts. */

@@ -19,6 +19,7 @@ import {
 	cfgStatusLineSessionAccent,
 	cfgStatusLineShowHookStatus,
 	cfgStatusLineTransparent,
+	cfgStatusLineUsageLine,
 	cfgTuiCodexResetFireworks,
 } from "./settings";
 import { cfgGoalStatusInFooter } from "../goals/settings";
@@ -34,17 +35,17 @@ export type StatusLineHostSession = StatusLineSession &
 /** Application policy and runtime services consumed by the portable status renderer. */
 export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	getSettings: () => ({
-		preset: settings.get("statusLine.preset"),
-		leftSegments: settings.get("statusLine.leftSegments"),
-		rightSegments: settings.get("statusLine.rightSegments"),
-		separator: settings.get("statusLine.separator"),
-		showHookStatus: settings.get("statusLine.showHookStatus"),
-		segmentOptions: settings.getGroup("statusLine").segmentOptions,
-		sessionAccent: settings.get("statusLine.sessionAccent"),
-		transparent: settings.get("statusLine.transparent"),
-		compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-		contextLine: settings.get("statusLine.contextLine"),
-		usageLine: settings.get("statusLine.usageLine"),
+		preset: cfgStatusLinePreset.get(settings),
+		leftSegments: cfgStatusLineLeftSegments.get(settings),
+		rightSegments: cfgStatusLineRightSegments.get(settings),
+		separator: cfgStatusLineSeparator.get(settings),
+		showHookStatus: cfgStatusLineShowHookStatus.get(settings),
+		segmentOptions: cfgStatusLineSegmentOptions.get(settings),
+		sessionAccent: cfgStatusLineSessionAccent.get(settings),
+		transparent: cfgStatusLineTransparent.get(settings),
+		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
+		contextLine: cfgStatusLineContextLine.get(settings),
+		usageLine: cfgStatusLineUsageLine.get(settings),
 	}),
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),

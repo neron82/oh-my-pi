@@ -67,6 +67,8 @@ export function canonicalTools(tools: Context["tools"]): string {
 			d: t.description ?? "",
 			p: t.parameters,
 			s: t.strict ?? null,
+			df: t.deferLoading ?? null,
+			native: t.native ?? null,
 			cf: t.customFormat ?? null,
 			cw: t.customWireName ?? null,
 		})),
@@ -76,9 +78,8 @@ export function canonicalTools(tools: Context["tools"]): string {
 /**
  * Canonical form of one provider-level message. The field set mirrors
  * `AppendOnlyContextManager.#messageDigest` (role, content, provider-native
- * replay payload, both tool-call spellings, both tool-result id/name spellings,
- * error flag, assistant id) so the monitor and the append-only sync disagree
- * on nothing.
+ * replay/control state, both tool-call spellings, both tool-result id/name
+ * spellings, error flag, assistant id) so monitor and sync disagree on nothing.
  */
 export function canonicalMessage(message: unknown): string {
 	if (!message || typeof message !== "object") {
@@ -89,6 +90,7 @@ export function canonicalMessage(message: unknown): string {
 		r: m.role ?? null,
 		c: m.content ?? null,
 		pp: m.providerPayload ?? null,
+		rc: m.requestControls ?? null,
 		tc: m.toolCalls ?? m.tool_calls ?? null,
 		tcid: m.toolCallId ?? m.tool_call_id ?? null,
 		tn: m.toolName ?? m.name ?? null,
@@ -112,6 +114,7 @@ export type FirstDivergence =
 	| "appended" // strict extension: previous request is a full byte-prefix
 	| "system"
 	| "tools"
+	| "inactiveTools"
 	| `message[${number}]`;
 
 /**
@@ -126,12 +129,13 @@ export interface PromptStabilityReport {
 	providerId: string;
 	/** Whether the request went through the append-only context manager. */
 	appendOnly: boolean;
-	/** Total serialized prompt size in UTF-8 bytes (system + tools + messages). */
+	/** Total serialized prompt size in UTF-8 bytes (system + active/inactive tools + messages). */
 	totalBytes: number;
 	systemBytes: number;
+	/** Active and inactive Anthropic tool-definition bytes. */
 	toolsBytes: number;
 	messagesBytes: number;
-	/** Bytes shared, in order, with the previous request (0 for the first). */
+	/** Bytes shared by the previous provider request and this one. */
 	stablePrefixBytes: number;
 	/** stablePrefixBytes / totalBytes — the deterministic local estimate of
 	 * the fraction of this prompt a prefix-aware backend could serve from
@@ -160,7 +164,8 @@ export interface PromptStabilityReport {
 	/**
 	 * Attribution of the prefix invalidation, most significant first.
 	 * Always non-empty; examples: "appended", "system-prompt-changed",
-	 * "tool-set-changed", "message[3]-rewritten", "compaction", "model-switch".
+	 * "tool-set-changed", "inactive-tool-state-changed",
+	 * "message[3]-rewritten", "compaction", "model-switch".
 	 */
 	cause: string[];
 	/** Session-level events noted since the previous request (e.g. compaction). */
@@ -177,6 +182,7 @@ interface RecordedRequest {
 	appendOnly: boolean;
 	system: string;
 	tools: string;
+	inactiveTools: string;
 	messages: string[];
 	toolNames: string[];
 	systemBytes: number;
@@ -188,6 +194,7 @@ interface RecordedRequest {
 	 * on the wire. */
 	systemPrompt: string[] | undefined;
 	toolsRef: Context["tools"];
+	inactiveToolsRef: Context["inactiveTools"];
 	messagesRef: Message[];
 }
 
@@ -224,11 +231,17 @@ export class PromptStabilityMonitor {
 	): PromptStabilityReport {
 		const systemPrompt = context.systemPrompt;
 		const tools = context.tools;
+		const inactiveTools = context.inactiveTools;
 		const messages = context.messages ?? [];
 
 		const system = canonicalSystemPrompt(systemPrompt);
 		const toolList = tools ?? [];
 		const toolCanonical = canonicalTools(toolList);
+		// Inactive definitions are provider framing required to reconstruct the
+		// latest Anthropic declared set, but their active/deferred placement is
+		// derived from message request-controls. Compare them independently so
+		// changes here do not masquerade as an active tool-roster rewrite.
+		const inactiveToolCanonical = canonicalTools(inactiveTools);
 		const toolNames = toolList.map(t => t.name);
 		const messageCanonicals: string[] = Array.from({ length: messages.length }, () => "");
 		for (let i = 0; i < messages.length; i++) {
@@ -236,7 +249,7 @@ export class PromptStabilityMonitor {
 		}
 
 		const systemBytes = byteLength(system);
-		const toolsBytes = byteLength(toolCanonical);
+		const toolsBytes = byteLength(toolCanonical) + byteLength(inactiveToolCanonical);
 		let messagesBytes = 0;
 		for (let i = 0; i < messageCanonicals.length; i++) {
 			messagesBytes += byteLength(messageCanonicals[i]!);
@@ -262,19 +275,24 @@ export class PromptStabilityMonitor {
 				toolsChanged = true;
 				stablePrefixBytes = systemBytes;
 			} else {
-				stablePrefixBytes = systemBytes + toolsBytes;
-				const bound = Math.min(messageCanonicals.length, prev.messages.length);
-				for (let i = 0; i < bound; i++) {
-					if (messageCanonicals[i] !== prev.messages[i]) {
-						firstDivergence = `message[${i}]`;
-						break;
+				stablePrefixBytes = systemBytes + byteLength(toolCanonical);
+				if (inactiveToolCanonical !== prev.inactiveTools) {
+					firstDivergence = "inactiveTools";
+				} else {
+					stablePrefixBytes += byteLength(inactiveToolCanonical);
+					const bound = Math.min(messageCanonicals.length, prev.messages.length);
+					for (let i = 0; i < bound; i++) {
+						if (messageCanonicals[i] !== prev.messages[i]) {
+							firstDivergence = `message[${i}]`;
+							break;
+						}
+						stablePrefixBytes += byteLength(messageCanonicals[i]!);
 					}
-					stablePrefixBytes += byteLength(messageCanonicals[i]!);
-				}
-				messagesShrank = messageCanonicals.length < prev.messages.length;
-				if (messageCanonicals.length === prev.messages.length && firstDivergence === "appended") {
-					// Same count, no divergence: byte-identical request (retry).
-					firstDivergence = "none";
+					messagesShrank = messageCanonicals.length < prev.messages.length;
+					if (messageCanonicals.length === prev.messages.length && firstDivergence === "appended") {
+						// Same count, no divergence: byte-identical request (retry).
+						firstDivergence = "none";
+					}
 				}
 			}
 		} else {
@@ -294,7 +312,13 @@ export class PromptStabilityMonitor {
 		}
 		if (cause.length === 0) {
 			cause.push(
-				prev === null ? "first-request" : firstDivergence === "appended" ? "appended" : "identical-request",
+				prev === null
+					? "first-request"
+					: firstDivergence === "inactiveTools"
+						? "inactive-tool-state-changed"
+						: firstDivergence === "appended"
+							? "appended"
+							: "identical-request",
 			);
 		}
 
@@ -337,6 +361,7 @@ export class PromptStabilityMonitor {
 			appendOnly,
 			system,
 			tools: toolCanonical,
+			inactiveTools: inactiveToolCanonical,
 			messages: messageCanonicals,
 			toolNames,
 			systemBytes,
@@ -345,6 +370,7 @@ export class PromptStabilityMonitor {
 			totalBytes,
 			systemPrompt,
 			toolsRef: toolList,
+			inactiveToolsRef: inactiveTools,
 			messagesRef: messages,
 		};
 		logger.debug("prompt-stability", {
@@ -395,26 +421,23 @@ export class PromptStabilityMonitor {
 
 	/**
 	 * The final context sections of the most recent recorded request. Used to
-	 * build a KV-aligned compaction request: the compaction summarization
-	 * replays exactly the system prompt + tools that were last on the wire,
-	 * plus the verbatim shadowed region, so it becomes a prefix extension of
-	 * the last live request.
+	 * build a KV-aligned compaction request: the summarization replays exactly
+	 * the system prompt + active/inactive tool definitions last on the wire,
+	 * plus the verbatim shadowed region.
 	 *
-	 * `systemPrompt`, `tools`, and `messages` are the recorded references (the
-	 * wire objects, for verbatim adoption when aligned); the `*Canonical`
-	 * fields are snapshots canonicalized at record time. Alignment validation
-	 * MUST use the canonical snapshots, never the raw references: the host's
-	 * replay construction awaits between fetching this context and comparing,
-	 * so an in-place rewrite of a recorded message/tool in that window would
-	 * otherwise make a stale reference compare equal to its own mutated self.
-	 * Comparing against record-time bytes makes any such drift fail alignment
-	 * and fall back to the (always-correct) replayed context. Returns
-	 * undefined before the first recorded request.
+	 * Context arrays are recorded references (for verbatim adoption when
+	 * aligned); the `*Canonical` fields are snapshots captured at record time.
+	 * Alignment validation MUST use those snapshots, never re-canonicalize raw
+	 * references after an awaited replay: an in-place rewrite in that window
+	 * would otherwise compare equal to its own mutated self. Drift fails
+	 * alignment and falls back to the always-correct replayed context.
 	 */
 	lastLiveContext():
 		| {
 				systemPrompt: string[];
 				tools: Context["tools"];
+				inactiveTools: Context["inactiveTools"];
+				inactiveToolsCanonical: string;
 				messages: Message[];
 				systemCanonical: string;
 				toolsCanonical: string;
@@ -426,6 +449,8 @@ export class PromptStabilityMonitor {
 		return {
 			systemPrompt: [...last.systemPrompt],
 			tools: last.toolsRef ?? [],
+			inactiveTools: last.inactiveToolsRef,
+			inactiveToolsCanonical: last.inactiveTools,
 			messages: last.messagesRef,
 			systemCanonical: last.system,
 			toolsCanonical: last.tools,

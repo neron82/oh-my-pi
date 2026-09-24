@@ -84,6 +84,24 @@ describe("PromptStabilityMonitor", () => {
 		expect(second.cause).toContain("tool-set-changed");
 	});
 
+	test("inactive Anthropic definitions diverge without reporting an active tool-set rewrite", () => {
+		const monitor = new PromptStabilityMonitor();
+		const messages = [userMessage("a")];
+		const first = monitor.recordRequest(
+			{ ...makeContext(messages, [tool("t")]), inactiveTools: [tool("old")] },
+			modelA,
+		);
+		const second = monitor.recordRequest(
+			{ ...makeContext(messages, [tool("t")]), inactiveTools: [tool("new")] },
+			modelA,
+		);
+
+		expect(second.firstDivergence).toBe("inactiveTools");
+		expect(second.toolsChanged).toBe(false);
+		expect(second.stablePrefixBytes).toBe(first.systemBytes + byteLength(canonicalTools([tool("t")])));
+		expect(second.cause).toEqual(["inactive-tool-state-changed"]);
+	});
+
 	test("system prompt change invalidates from byte zero", () => {
 		const monitor = new PromptStabilityMonitor();
 		const first = monitor.recordRequest(makeContext([userMessage("a")], undefined, ["sys"]), modelA);
@@ -172,8 +190,9 @@ describe("PromptStabilityMonitor", () => {
 
 		const systemPrompt = ["live-system"];
 		const tools = [tool("t")];
+		const inactiveTools = [tool("old")];
 		const messages = [userMessage("a"), userMessage("b")];
-		monitor.recordRequest({ systemPrompt, tools, messages } as Context, modelA);
+		monitor.recordRequest({ systemPrompt, tools, inactiveTools, messages } as Context, modelA);
 
 		const live = monitor.lastLiveContext();
 		// Wire objects: adopted verbatim when alignment holds. systemPrompt is
@@ -181,11 +200,13 @@ describe("PromptStabilityMonitor", () => {
 		// message/tool arrays stay by-reference.
 		expect(live?.systemPrompt).toEqual(systemPrompt);
 		expect(live?.tools).toBe(tools);
+		expect(live?.inactiveTools).toBe(inactiveTools);
 		expect(live?.messages).toBe(messages);
 		// Record-time canonical snapshots: the alignment gate compares against
 		// these, never against re-canonicalizing the raw references.
 		expect(live?.systemCanonical).toBe(canonicalSystemPrompt(["live-system"]));
 		expect(live?.toolsCanonical).toBe(canonicalTools([tool("t")]));
+		expect(live?.inactiveToolsCanonical).toBe(canonicalTools(inactiveTools));
 		expect(live?.messageCanonicals).toEqual(messages.map(m => canonicalMessage(m)));
 	});
 

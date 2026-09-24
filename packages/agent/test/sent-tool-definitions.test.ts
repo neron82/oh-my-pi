@@ -81,6 +81,8 @@ describe("Agent — inactive tool definitions", () => {
 			);
 			const side = await agent.buildSideRequestContext(messages);
 			expect(side.inactiveTools).toEqual([sentGrep]);
+			const replay = await agent.buildProviderContextForMessages(agent.state.messages, agent.state.model!);
+			expect(replay.inactiveTools).toEqual([sentGrep]);
 		} finally {
 			if (previousDialect === undefined) delete Bun.env.PI_DIALECT;
 			else Bun.env.PI_DIALECT = previousDialect;

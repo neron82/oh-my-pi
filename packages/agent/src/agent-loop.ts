@@ -1769,9 +1769,21 @@ export interface ProviderContextBuild {
 	convertToLlm: AgentLoopConfig["convertToLlm"];
 	/** Final provider-level transform (obfuscation, image normalization, reminders). */
 	transformProviderContext?: AgentLoopConfig["transformProviderContext"];
+	/** Remembers final tool declarations for Anthropic inactive-tool re-declaration. */
+	sentToolDefinitions?: AgentLoopConfig["sentToolDefinitions"];
 	intentTracing?: boolean;
 	pruneToolDescriptions?: boolean;
 	dialect?: Dialect;
+	getDialect?: AgentLoopConfig["getDialect"];
+}
+
+function resolveProviderDialect(
+	build: Pick<ProviderContextBuild, "dialect" | "getDialect">,
+	model: Model,
+): Dialect | undefined {
+	return (
+		(build.getDialect ? build.getDialect(model) : build.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT)
+	);
 }
 
 /** Base (pre-transform) provider context for the plain branch: system prompt +
@@ -1793,19 +1805,20 @@ function buildBaseProviderContext(
 	};
 }
 
-/** Shared tail in live-request order: provider-level transform, then
- * owned-dialect in-band encoding. Shared by the live loop and the replay. */
+/** Shared tail in live-request order: provider-level transform, owned-dialect
+ * in-band encoding, then final Anthropic tool-state decoration. Shared by the
+ * live loop and the replay. */
 async function finalizeProviderContext(
 	llmContext: Context,
 	model: Model,
-	build: Pick<ProviderContextBuild, "dialect" | "transformProviderContext">,
+	build: Pick<ProviderContextBuild, "sentToolDefinitions" | "transformProviderContext">,
+	ownedDialect: Dialect | undefined,
 ): Promise<{ context: Context; promptToolWireTools: Context["tools"] }> {
 	let context = llmContext;
 	if (build.transformProviderContext) {
 		context = await build.transformProviderContext(context, model);
 	}
 	let promptToolWireTools: Context["tools"];
-	const ownedDialect: Dialect | undefined = build.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	if (ownedDialect && context.tools && context.tools.length > 0) {
 		promptToolWireTools = context.tools;
 		context = {
@@ -1815,6 +1828,14 @@ async function finalizeProviderContext(
 			tools: undefined,
 		};
 	}
+	// After transformProviderContext and dialect encoding, so these are exactly
+	// the active native definitions the provider is about to receive. Replay
+	// uses the same path, making its inactive-tool decoration byte-aligned too.
+	if (build.sentToolDefinitions && context.tools) {
+		build.sentToolDefinitions.record(context.tools);
+		const inactiveTools = build.sentToolDefinitions.inactiveFor(context.messages, context.tools);
+		if (inactiveTools) context = { ...context, inactiveTools };
+	}
 	return { context, promptToolWireTools };
 }
 
@@ -1823,8 +1844,8 @@ async function finalizeProviderContext(
  * `messages` under the given system prompt + tools, running the same pipeline
  * in the same order as the live request: transformContext → convertToLlm →
  * normalizeMessagesForProvider → base context (normalizeTools) →
- * transformProviderContext → owned-dialect in-band encoding.
- *
+ * transformProviderContext → owned-dialect in-band encoding → Anthropic
+ * inactive-tool decoration.
  * KV-aligned compaction uses this to replay the shadowed region through the
  * live pipeline so the summarization request stays byte-aligned with the last
  * live request (prompt-cache stability). Uses the PLAIN branch only: in
@@ -1847,7 +1868,7 @@ export async function buildProviderContext(
 	}
 	const llmMessages = await build.convertToLlm(transformed);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
-	const ownedDialect: Dialect | undefined = build.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+	const ownedDialect = resolveProviderDialect(build, model);
 	const pruneToolDescriptions = !!build.pruneToolDescriptions && !ownedDialect;
 	const base = buildBaseProviderContext(
 		{ intentTracing: build.intentTracing, pruneToolDescriptions },
@@ -1855,7 +1876,7 @@ export async function buildProviderContext(
 		tools,
 		normalizedMessages,
 	);
-	return (await finalizeProviderContext(base, model, build)).context;
+	return (await finalizeProviderContext(base, model, build, ownedDialect)).context;
 }
 
 async function prepareProviderCall(
@@ -1871,8 +1892,7 @@ async function prepareProviderCall(
 
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
-	const ownedDialect: Dialect | undefined =
-		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+	const ownedDialect = resolveProviderDialect(config, model);
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
@@ -1889,7 +1909,7 @@ async function prepareProviderCall(
 			normalizedMessages,
 		);
 	}
-	const finalized = await finalizeProviderContext(llmContext, model, config);
+	const finalized = await finalizeProviderContext(llmContext, model, config, ownedDialect);
 	return { model, context: finalized.context, promptToolWireTools: finalized.promptToolWireTools, ownedDialect };
 }
 

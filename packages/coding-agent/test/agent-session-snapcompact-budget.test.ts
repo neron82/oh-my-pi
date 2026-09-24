@@ -24,6 +24,7 @@ import { effectiveReserveTokens, prepareCompaction } from "@oh-my-pi/pi-agent-co
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgSnapcompactMaxFrames } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -293,7 +294,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		// A provider whose 5-frame image budget exceeds the configured
 		// ceiling, so the derived cap — not the ceiling — is what shrinks.
 		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
-		session.settings.set("snapcompact.maxFrames", 1);
+		cfgSnapcompactMaxFrames.set(session.settings, 1);
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -323,7 +324,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
 		// The configured ceiling (10) is above the provider's 5-frame image
 		// budget: the user cap clamps, it never raises.
-		session.settings.set("snapcompact.maxFrames", 10);
+		cfgSnapcompactMaxFrames.set(session.settings, 10);
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -348,7 +349,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
-		session.settings.set("snapcompact.maxFrames", 0);
+		cfgSnapcompactMaxFrames.set(session.settings, 0);
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];

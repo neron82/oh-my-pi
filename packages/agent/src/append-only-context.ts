@@ -46,8 +46,9 @@ function toolKeyForPrefix(tool: AgentTool): string {
 		tool.name ?? "",
 		tool.description ?? "",
 		String(tool.strict ?? ""),
-		tool.customWireName ?? "",
 		typeof tool.intent === "function" ? `fn:${objectId(tool.intent)}` : `mode:${tool.intent ?? "require"}`,
+		String(tool.deferLoading ?? ""),
+		JSON.stringify(tool.native ?? null),
 		objectId(params),
 		objectId(customFormat),
 		objectId(examples),
@@ -425,10 +426,11 @@ export class AppendOnlyContextManager {
 	}
 
 	/** Deterministic digest over every field the provider may serialize — role,
-	 * content, provider-native replay payloads, tool calls (both `toolCalls` and
-	 * OpenAI-wire `tool_calls`), tool-result ids/names/error flags (both internal
-	 * camelCase and wire snake_case), and assistant `id` — so an in-place rewrite
-	 * of *any* of these fields is visible to {@link #longestStablePrefix}. */
+	 * content, provider-native replay/control payloads, tool calls (both
+	 * `toolCalls` and OpenAI-wire `tool_calls`), tool-result ids/names/error
+	 * flags (both internal camelCase and wire snake_case), and assistant `id` —
+	 * so any in-place provider-relevant rewrite is visible to
+	 * {@link #longestStablePrefix}. */
 	#messageDigest(msg: unknown): number {
 		if (!msg || typeof msg !== "object") return 0;
 		const m = msg as Record<string, unknown>;
@@ -439,6 +441,7 @@ export class AppendOnlyContextManager {
 			r: m.role ?? null,
 			c: m.content ?? null,
 			pp: m.providerPayload ?? null,
+			rc: m.requestControls ?? null,
 			tc: m.toolCalls ?? m.tool_calls ?? null,
 			tcid: m.toolCallId ?? m.tool_call_id ?? null,
 			tn: m.toolName ?? m.name ?? null,
@@ -481,6 +484,8 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 			d: t.description,
 			p: t.parameters,
 			s: t.strict,
+			df: t.deferLoading,
+			native: t.native,
 			cf: t.customFormat,
 			cw: t.customWireName,
 		})),

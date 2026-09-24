@@ -99,7 +99,7 @@ function createHost(model: Model, modelRegistry: ModelRegistry, capture: Capture
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => false,
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
@@ -120,7 +120,7 @@ describe("TurnRecovery deferred-resume gating", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-turn-recovery-deferred-");
 		authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 	});
 
@@ -141,7 +141,7 @@ describe("TurnRecovery deferred-resume gating", () => {
 		// reset, the weekly window does not — the merged credential block is
 		// still provider-timed to that reset.
 		const blockedUntil = Date.now() + 17_237_567;
-		vi.spyOn(authStorage, "markUsageLimitReached").mockResolvedValue({
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({
 			switched: false,
 			blockedUntilMs: blockedUntil,
 			statedResetAtMs: blockedUntil,
@@ -168,7 +168,7 @@ describe("TurnRecovery deferred-resume gating", () => {
 		const capture: Capture = { events: [], entries: [], scheduled: [] };
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, capture));
 		const message = makeUsageLimitMessage(model);
-		vi.spyOn(authStorage, "markUsageLimitReached").mockResolvedValue({
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({
 			switched: false,
 			blockedUntilMs: Date.now() + 30 * 60 * 1000,
 		});

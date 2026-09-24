@@ -28,7 +28,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const sharedDir = TempDir.createSync("@pi-advisor-stability-shared-");
 const sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 
 afterAll(() => {
@@ -57,7 +57,7 @@ function text(text: string): MockResponse {
 async function createSession(responses: MockResponse[]): Promise<AgentSession> {
 	tempDir = TempDir.createSync("@pi-advisor-stability-");
 	const mock = createMockModel({ responses });
-	sharedAuthStorage.setRuntimeApiKey(mock.provider, "test-key");
+	sharedAuthStorage.keys.setRuntime(mock.provider, "test-key");
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,

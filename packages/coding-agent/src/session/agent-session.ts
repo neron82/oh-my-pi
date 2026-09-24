@@ -11732,7 +11732,7 @@ export class AgentSession implements SettingsScope {
 			thinkingLevel: this.thinkingLevel,
 			tools: this.agent.state.tools,
 			promptStability: this.agent.stabilityMonitor.last(),
-			inlineToolDescriptors: this.#pruneToolDescriptions,
+			inlineToolDescriptors: this.agent.pruneToolDescriptions,
 		});
 	}
 

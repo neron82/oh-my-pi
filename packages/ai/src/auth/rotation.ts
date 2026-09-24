@@ -244,6 +244,10 @@ export class RateLimits implements LimitsApi {
 		// independently of whether the report extends the hint so a shorter
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
+		// Latest boundary stated by any exhausted window. This is weaker than
+		// reportResetAtMs: durable resume may re-arm when a renewed limit reports
+		// a new boundary, while an in-request sleep still requires full authority.
+		let statedResetAtMs: number | undefined;
 		if (target && routing.strategy) {
 			const report = await raceSignal(
 				this.#deps.usage.report(provider, target.credential, options),
@@ -263,6 +267,7 @@ export class RateLimits implements LimitsApi {
 					const futureResets = exhaustedLimits
 						.map(limit => windowResetAt(limit.window))
 						.filter((reset): reset is number => reset !== undefined && reset > nowMs);
+					if (futureResets.length > 0) statedResetAtMs = Math.max(...futureResets);
 					if (exhaustedLimits.length > 0 && futureResets.length === exhaustedLimits.length) {
 						reportResetAtMs = Math.max(...futureResets);
 					}
@@ -288,6 +293,7 @@ export class RateLimits implements LimitsApi {
 			...rotation,
 			requestedBlockedUntilMs,
 			...(reportResetAtMs === undefined ? {} : { reportResetAtMs }),
+			...(statedResetAtMs === undefined ? {} : { statedResetAtMs }),
 		};
 	}
 	#extractStructuredApiKeyToken(apiKey: string): string | undefined {

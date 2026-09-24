@@ -316,7 +316,7 @@ describe("AgentSession deferred resume", () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const mock = createMockModel({ responses: [text("first reply"), text("continued work")] });
-		authStorage.setRuntimeApiKey(mock.provider, "test-key");
+		authStorage.keys.setRuntime(mock.provider, "test-key");
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
 		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 		const agent = new Agent({
