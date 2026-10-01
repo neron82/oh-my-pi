@@ -7,8 +7,6 @@ import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
-// Typed defaults for array/record settings — named constants avoid `as` casts
-// under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 
 export const cfgToolsArtifactSpillThreshold = register({
@@ -122,6 +120,27 @@ export const cfgToolsArtifactTailLines = register({
 			{ value: "1000", label: "1000 lines", description: "~5K tokens" },
 			{ value: "2000", label: "2000 lines", description: "~10K tokens" },
 			{ value: "5000", label: "5000 lines", description: "~25K tokens" },
+		],
+	},
+});
+
+export const cfgToolsArtifactMaxBytes = register({
+	id: "tools.artifactMaxBytes",
+	type: "number",
+	default: 16,
+	ui: {
+		tab: "tools",
+		group: "Output Limits",
+		label: "Artifact File Cap (MB)",
+		description:
+			"Maximum size of the artifact file saved for streaming tool output (bash, python, js eval). Larger output keeps its beginning (up to 3 MB) and its most recent remainder, with a truncation notice between them. 0 = unlimited.",
+		options: [
+			{ value: "0", label: "Unlimited", description: "Save the complete output" },
+			{ value: "4", label: "4 MB" },
+			{ value: "16", label: "16 MB", description: "Default" },
+			{ value: "64", label: "64 MB" },
+			{ value: "256", label: "256 MB" },
+			{ value: "1024", label: "1 GB" },
 		],
 	},
 });
@@ -581,6 +600,18 @@ export const cfgComputerEnabled = register({
 		group: "Available Tools",
 		label: "Computer",
 		description: "Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility)",
+	},
+});
+
+export const cfgRatchetEnabled = register({
+	id: "ratchet.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Ratchet",
+		description: "Enable the ratchet eval/hillclimb prelude; /ratchet turns it on for the current session",
 	},
 });
 

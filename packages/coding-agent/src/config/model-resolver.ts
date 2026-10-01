@@ -41,6 +41,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	parseConfiguredThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
@@ -509,6 +510,24 @@ type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
+const kModelOrderIndex = Symbol("model-resolver.modelOrderIndex");
+type ModelsWithOrderIndex = readonly Model<Api>[] & {
+	[kModelOrderIndex]?: Map<string, number>;
+};
+
+/** `provider/id` → last position in `availableModels`; cached on the array like the provider indexes. */
+function getModelOrderIndex(availableModels: readonly Model<Api>[]): Map<string, number> {
+	const tagged = availableModels as ModelsWithOrderIndex;
+	const cached = tagged[kModelOrderIndex];
+	if (cached) return cached;
+	const index = new Map<string, number>();
+	for (let i = 0; i < availableModels.length; i += 1) {
+		index.set(formatModelString(availableModels[i]), i);
+	}
+	tagged[kModelOrderIndex] = index;
+	return index;
+}
+
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
 	providerUsageRank: Map<string, number>;
@@ -536,10 +555,7 @@ function buildPreferenceContext(
 	}
 	const providerPriorityRank = buildModelProviderPriorityRank(preferences?.providerOrder);
 	const deprioritizedProviders = new Set(preferences?.deprioritizeProviders ?? []);
-	const modelOrder = new Map<string, number>();
-	for (let i = 0; i < availableModels.length; i += 1) {
-		modelOrder.set(formatModelString(availableModels[i]), i);
-	}
+	const modelOrder = getModelOrderIndex(availableModels);
 
 	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
 }
@@ -842,6 +858,25 @@ function matchModel(
 	return pickPreferredModel(topCandidates, context);
 }
 
+/**
+ * Recover the effort a retired wire-tier id (e.g. `gemini-3.8-flash-high`) implied before it was
+ * collapsed into a logical model. Only a route owned by exactly one level carries intent: the
+ * model's default wire id and ids shared by several levels imply nothing, so the caller's level
+ * still applies.
+ */
+function inferWireRouteThinkingLevel(pattern: string, model: Model<Api>): ConfiguredThinkingLevel | undefined {
+	const routing = model.thinking?.effortRouting;
+	if (!routing) return undefined;
+	const normalized = pattern.trim().toLowerCase();
+	const providerPrefix = `${model.provider.toLowerCase()}/`;
+	const wireId = normalized.startsWith(providerPrefix) ? normalized.slice(providerPrefix.length) : normalized;
+	if (wireId === model.id.toLowerCase() || wireId === model.requestModelId?.toLowerCase()) return undefined;
+
+	const levels = [ThinkingLevel.Off, ...(model.thinking?.efforts ?? [])];
+	const matches = levels.filter(level => routing[level]?.toLowerCase() === wireId);
+	return matches.length === 1 ? parseConfiguredThinkingLevel(matches[0]) : undefined;
+}
+
 export interface ParsedModelResult {
 	model: Model<Api> | undefined;
 	/** Thinking level if explicitly specified in pattern, undefined otherwise */
@@ -856,12 +891,11 @@ export interface ParsedModelResult {
  * Parse a pattern to extract model and thinking level.
  * Handles models with colons in their IDs (e.g., OpenRouter's :exacto suffix).
  *
- * Algorithm:
- * 1. Try to match full pattern as a model
- * 2. If found, return it with undefined thinking level
- * 3. If not found and has colons, split on last colon:
- *    - If suffix is valid thinking level, use it and recurse on prefix
- *    - If suffix is invalid, warn and recurse on prefix
+ * 1. Try to match the full pattern as a model
+ * 2. If it names a collapsed wire route, preserve that route's thinking level
+ * 3. If not found and it has colons, split on the last colon:
+ *    - If the suffix is a valid thinking level, use it and recurse on the prefix
+ *    - If the suffix is invalid, warn and recurse on the prefix
  *
  * @internal Exported for testing
  */
@@ -874,7 +908,13 @@ function parseModelPatternWithContext(
 	// Exact match on the full pattern first (no fuzzy): a literal id that
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
 	if (exactMatch) {
-		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
+		const thinkingLevel = inferWireRouteThinkingLevel(pattern, exactMatch);
+		return {
+			model: exactMatch,
+			thinkingLevel,
+			warning: undefined,
+			explicitThinkingLevel: thinkingLevel !== undefined,
+		};
 	}
 
 	// Prefer a fuzzy match whose actual id ends in the suffix, preserving
@@ -1506,12 +1546,7 @@ export interface RoleChainCandidate {
 }
 
 /** Resolve a role's primary and retry candidates in effective attempt order. */
-export function resolveRoleChain(
-	role: string,
-	settings: Settings,
-	pool: Model<Api>[],
-	options?: { hoistProvider?: string },
-): RoleChainCandidate[] {
+export function resolveRoleChain(role: string, settings: Settings, pool: Model<Api>[]): RoleChainCandidate[] {
 	const configuredRoles = settings.getModelRoles();
 	const configured = settings.getModelRole(role)?.trim();
 	const primarySelector = configured || formatModelRoleAlias(role);
@@ -1538,16 +1573,7 @@ export function resolveRoleChain(
 		candidateByRoute.set(key, candidate);
 		candidates.push(candidate);
 	}
-
-	const hoistProvider = options?.hoistProvider;
-	if (!hoistProvider) return candidates;
-	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
-	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
-	if (hoisted.length === 0) return candidates;
-	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
-	const reordered = [...hoisted, ...remaining];
-	let reorderedIndex = 0;
-	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));
+	return candidates;
 }
 
 /**

@@ -51,6 +51,7 @@ import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
+	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
@@ -519,28 +520,7 @@ export function createAcpExtensionUiContext(
 					},
 				},
 			);
-			if (timedOut) {
-				return {
-					kind: "submit",
-					results: questions.map(question => {
-						const labels = question.options.map(option => option.label);
-						const fallbackIndex = Math.min(
-							Math.max(question.recommended ?? 0, 0),
-							Math.max(labels.length - 1, 0),
-						);
-						const fallback = labels[fallbackIndex];
-						return {
-							id: question.id,
-							question: question.question,
-							options: labels,
-							multi: question.multi ?? false,
-							selectedOptions: fallback === undefined ? [] : [fallback],
-							customInput: undefined,
-							timedOut: true,
-						};
-					}),
-				};
-			}
+			if (timedOut) return timedOutAskDialogResult(questions);
 			if (!content) return undefined;
 
 			return {
@@ -653,7 +633,7 @@ export class AcpAgent implements Agent {
 		return {
 			protocolVersion: PROTOCOL_VERSION,
 			agentInfo: {
-				name: "oh-my-pi",
+				name: "omp",
 				title: "omp",
 				version: VERSION,
 			},
@@ -1189,7 +1169,7 @@ export class AcpAgent implements Agent {
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				const sm = await Settings.init();
-				const disabledIds = (cfgDisabledExtensions.get(sm) as string[] | undefined) ?? [];
+				const disabledIds = cfgDisabledExtensions.get(sm);
 				const extensions = await loadAllExtensions(cwd, disabledIds);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
@@ -2208,6 +2188,7 @@ export class AcpAgent implements Agent {
 			orchestrationCacheRead: usage.orchestrationCacheRead,
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
+			subagentCost: usage.subagentCost,
 		};
 	}
 

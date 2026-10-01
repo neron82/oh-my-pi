@@ -214,6 +214,8 @@ export interface ToolSession {
 	hasUI: boolean;
 	/** Whether `ask` can reach a human. Defaults to `hasUI`. */
 	canPromptUser?: boolean;
+	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
+	settingsApproval?: boolean;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -320,7 +322,7 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
-	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
+	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
@@ -334,6 +336,12 @@ export interface ToolSession {
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */
 	getEvalPreludes?: () => readonly EvalPreludeDefinition[];
+	/**
+	 * Eval preludes frozen into the system prompt and eval description at the
+	 * last base rebuild. Mid-session toggles ride a hidden notice instead of
+	 * rewriting the provider cache prefix.
+	 */
+	getAdvertisedEvalPreludes?: () => readonly EvalPreludeDefinition[];
 	/** Reject new eval work once session disposal has started. */
 	assertEvalExecutionAllowed?: () => void;
 	/** Track tool-owned eval work so session disposal can await/abort it like direct session eval runs. */
@@ -392,6 +400,13 @@ export interface ToolSession {
 	getSessionSpawns: () => string | null;
 	/** Session-scoped agent definitions (user-tagged model pseudonyms) merged after discovered agents. */
 	getSessionAgents?: () => readonly AgentDefinition[];
+	/**
+	 * Session agents baked into the current base prompt surface. The task
+	 * description lists these instead of the live set so tagging a model
+	 * mid-session does not mutate the provider tool prefix; the delta rides a
+	 * hidden notice. Absent when the embedder has no base-prompt surface.
+	 */
+	advertisedSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
@@ -470,6 +485,8 @@ export interface ToolSession {
 	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
 	 */
 	getLastAssistantText?: () => string | undefined;
+	/** Resolve a terminal yield's current or immediately preceding report, bound to its call ID. */
+	getYieldReportText?: (toolCallId: string) => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
@@ -693,7 +710,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		) {
 			requestedTools.push("ast_edit");
 		}
-		if (["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings) ?? "")) {
+		if (["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings))) {
 			for (const name of ["recall", "retain", "reflect"]) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
@@ -713,7 +730,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (cfgAutolearnEnabled.get(session.settings) && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings) ?? "") &&
+				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings)) &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -755,10 +772,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 				cfgCheckpointEnabled.get(session.settings) &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
 			);
-		// Subagents never block on `wait`: owned job results re-wake their run
-		// through the executor's quiescence barrier, and parent messages steer them.
 		if (name === "wait") {
-			if ((session.taskDepth ?? 0) > 0) return false;
 			return (
 				cfgAsyncEnabled.get(session.settings) ||
 				(session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)) ||
@@ -766,7 +780,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings) ?? "");
+			return ["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings));
 		}
 		if (name === "memory_edit") return cfgMemoryBackend.get(session.settings) === "mnemopi";
 		if (name === "manage_skill")
@@ -778,11 +792,11 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			return (
 				cfgAutolearnEnabled.get(session.settings) &&
 				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings) ?? "")
+				["hindsight", "mnemopi", "local"].includes(cfgMemoryBackend.get(session.settings))
 			);
 		}
 		if (name === "task") {
-			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings) ?? 2, session.taskDepth ?? 0);
+			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
 		}
 		return true;
 	};

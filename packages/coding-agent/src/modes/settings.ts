@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -12,10 +13,13 @@ import {
 import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+
+const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
 // ────────────────────────────────────────────────────────────────────────
 // General settings (no UI)
@@ -63,9 +67,7 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => {
-	if (name !== undefined) setAutoThemeMapping("dark", name);
-});
+effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
@@ -79,9 +81,7 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => {
-	if (name !== undefined) setAutoThemeMapping("light", name);
-});
+effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
@@ -132,9 +132,7 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, shape => {
-	if (shape !== undefined) setEditorGapComposerShape(shape);
-});
+effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
@@ -305,7 +303,7 @@ export const cfgStatusLineRightSegments = register({
 export const cfgStatusLineSegmentOptions = register({
 	id: "statusLine.segmentOptions",
 	type: "record",
-	default: {} as Record<string, unknown>,
+	default: EMPTY_UNKNOWN_RECORD,
 });
 
 // Images and terminal
@@ -410,7 +408,8 @@ export const cfgTerminalShowProgress = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Native Terminal Progress",
-		description: "Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running",
+		description:
+			"Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running (always on in Tern)",
 	},
 });
 
@@ -459,8 +458,9 @@ export const cfgTuiCodexResetFireworks = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Codex Reset Fireworks",
-		description:
-			"Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until Escape",
+		get description() {
+			return `Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until ${formatKeyHint("escape")}`;
+		},
 	},
 });
 
@@ -522,8 +522,10 @@ export const cfgTuiMouse = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Mouse Click-to-Focus",
-		description:
-			"Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+		},
 	},
 });
 
@@ -574,6 +576,18 @@ export const cfgDisplayPinnedAgents = register({
 			{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
 			{ value: "full", label: "Full", description: "Always list every live agent" },
 		],
+	},
+});
+
+export const cfgDisplaySubagentLivePreview = register({
+	id: "display.subagentLivePreview",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Subagent Live Preview",
+		description: "Show each pinned subagent's current (or most recent) tool call beneath its row",
 	},
 });
 
@@ -737,8 +751,9 @@ export const cfgTuiVimMode = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Vim Editing Mode",
-		description:
-			"Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes",
+		get description() {
+			return `Modal prompt editing. ${formatKeyHint("escape")} leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes`;
+		},
 	},
 });
 
@@ -815,8 +830,9 @@ export const cfgComposerRecallClearedDrafts = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Recall Cleared Drafts",
-		description:
-			"Keep drafts cleared with Ctrl+C in local Up/Down history until exit; disabling affects future clears",
+		get description() {
+			return `Keep drafts cleared with ${formatKeyHint("ctrl+c")} in local ${formatKeyHints(["up", "down"])} history until exit; disabling affects future clears`;
+		},
 	},
 });
 
@@ -829,8 +845,35 @@ export const cfgDoubleEscapeAction = register({
 		tab: "interaction",
 		group: "Input",
 		label: "Double-Escape Action",
+		get description() {
+			return `What pressing ${formatKeyHint("escape")} twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing`;
+		},
+	},
+});
+
+export const cfgBareExitOnEmptySession = register({
+	id: "input.bareExitOnEmptySession",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Exit on Empty Session",
 		description:
-			"What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing",
+			"Submitting exactly `exit`, `quit`, or `q` (any case) before the first message quits instead of prompting the model",
+	},
+});
+
+export const cfgBareSlashCommands = register({
+	id: "input.bareSlashCommands",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Slash Commands",
+		description:
+			"Submitting exactly a command name without the leading `/` (e.g. `model`, `compact`) runs that slash command; once the session has messages, press Enter twice to confirm",
 	},
 });
 
@@ -882,14 +925,33 @@ export const cfgSpellingTypoDetection = register({
 
 export const cfgSpellingAutocomplete = register({
 	id: "spelling.autocomplete",
-	type: "boolean",
-	default: true,
+	type: "enum",
+	values: WORD_COMPLETION_METHODS,
+	default: "auto",
 	ui: {
 		tab: "interaction",
 		group: "Input",
-		label: "Word Autocomplete (macOS)",
-		description: "Show macOS dictionary word completions as inline hints accepted with Tab",
-		condition: "macOS",
+		label: "Word Autocomplete",
+		get description() {
+			return `Show predicted word completions as inline hints: ${formatKeyHint("tab")} accepts with a space, ${formatKeyHint("right")} without`;
+		},
+		options: [
+			{ value: "off", label: "Off", description: "No word completion" },
+			{
+				value: "auto",
+				label: "Auto",
+				description: "N-gram (nothing to download)",
+			},
+			{ value: "ngram", label: "N-gram", description: "Learns your vocabulary from prompt history" },
+			{
+				value: "smollm",
+				label: "SmolLM",
+				description: "Small on-device language model blended with N-gram (downloads weights on first use)",
+			},
+			...(process.platform === "darwin"
+				? [{ value: "apple" as const, label: "Apple", description: "macOS dictionary completions" }]
+				: []),
+		],
 	},
 });
 
@@ -1053,6 +1115,18 @@ export const cfgStartupChangelogMode = register({
 	},
 });
 
+export const cfgMagicKeywordsEnabled = register({
+	id: "magicKeywords.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Magic Keywords",
+		label: "Magic Keywords",
+		description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
+	},
+});
+
 /** One `magicKeywords.<id>` toggle per registered keyword, keyed by keyword id. */
 export const cfgMagicKeyword = Object.fromEntries(
 	MAGIC_KEYWORDS.map(keyword => [
@@ -1065,18 +1139,6 @@ export const cfgMagicKeyword = Object.fromEntries(
 		}),
 	]),
 ) as Record<MagicKeywordId, Setting<boolean>>;
-
-export const cfgMagicKeywordsEnabled = register({
-	id: "magicKeywords.enabled",
-	type: "boolean",
-	default: true,
-	ui: {
-		tab: "interaction",
-		group: "Magic Keywords",
-		label: "Magic Keywords",
-		description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
-	},
-});
 
 // Notifications
 export const cfgCompletionNotify = register({

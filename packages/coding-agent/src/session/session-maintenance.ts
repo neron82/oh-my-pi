@@ -46,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	type PruneResult,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -64,7 +65,7 @@ import type {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { isRecord, logger, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
@@ -103,6 +104,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
+import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" with { type: "text" };
 
 import {
 	type CompactionSettings,
@@ -435,6 +437,11 @@ export interface SessionMaintenanceHost {
 	): Promise<HandoffResult | undefined>;
 	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
 	dropPersistedAssistantTurn(message: AssistantMessage): Promise<string | undefined>;
+	/**
+	 * Keep a terminal failure whose turn was dropped from history visible to
+	 * post-settle readers (`AgentSession.getLastAssistantMessage`) until the next run.
+	 */
+	retainTerminalFailure(message: AssistantMessage): void;
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
@@ -555,6 +562,14 @@ export class SessionMaintenance {
 	#midTurnDeadEndPendingPrePrompt = false;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
+	/**
+	 * {@link #nativeSpeculationKey} of the session and model whose native
+	 * speculative compaction failed for a reason a retry would hit again (an
+	 * exhausted output budget, a tool call, a refusal). Until a compaction
+	 * commits, speculation does not re-send the request and the threshold pass
+	 * falls back to the next method instead.
+	 */
+	#failedNativeSpeculation: string | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
@@ -701,6 +716,20 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	/**
+	 * Durably commit a prune pass, restoring the blanked results when the rewrite
+	 * fails so live context never diverges from the history its derived state
+	 * (advisor prefix, todo phases, provider sessions) was built from.
+	 */
+	async #persistPrune(result: PruneResult): Promise<void> {
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			result.undo();
+			throw error;
+		}
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -722,7 +751,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
@@ -768,7 +797,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
@@ -1980,7 +2009,9 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, {
+			skipRemote: this.#nativeSpeculationFailed(model),
+		});
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
@@ -1989,6 +2020,9 @@ export class SessionMaintenance {
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const model = this.#model;
+		// Keyed now: the session can switch before the run settles.
+		const nativeKey = model && this.#nativeSpeculationKey(model);
 		this.#speculation = run;
 		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
 			logger.debug("Speculative compaction failed", {
@@ -1996,7 +2030,31 @@ export class SessionMaintenance {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			if (this.#speculation === run) this.#speculation = undefined;
+			// Keyed by the live model even when a compaction-model candidate made the
+			// failing request: every consumer checks the live model, and a false hit
+			// only moves this cycle to the next configured method. Errors with no
+			// HTTP status classify by message text, so an unrecognised transient
+			// failure costs the same single early fallback.
+			if (
+				method === "remote" &&
+				model &&
+				!controller.signal.aborted &&
+				error instanceof NativeCompactionError &&
+				!AIError.retriable(AIError.classify(error.cause, model.api))
+			) {
+				this.#failedNativeSpeculation = nativeKey;
+			}
 		});
+	}
+
+	/** Identity of `model`'s native speculation in the current session. */
+	#nativeSpeculationKey(model: Model): string {
+		return `${this.#host.sessionManager.getSessionId()}/${model.provider}/${model.id}`;
+	}
+
+	/** Whether `model`'s native speculation already failed for good this cycle. */
+	#nativeSpeculationFailed(model: Model): boolean {
+		return this.#failedNativeSpeculation === this.#nativeSpeculationKey(model);
 	}
 
 	/**
@@ -2030,7 +2088,9 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
-		const method = resolveSpeculationMethod(model, settings);
+		const method = resolveSpeculationMethod(model, settings, {
+			skipRemote: this.#nativeSpeculationFailed(model),
+		});
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
@@ -2267,6 +2327,8 @@ export class SessionMaintenance {
 				tokensAfter: this.#projectCompactedContextTokens(args),
 			},
 		);
+		// A committed compaction starts a new cycle; native compaction gets a fresh try.
+		this.#failedNativeSpeculation = undefined;
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -2588,9 +2650,10 @@ export class SessionMaintenance {
 	 * 1. Input overflow + promotion: promote to larger model, retry without maintenance.
 	 * 2. Input overflow + no promotion target: run context maintenance, auto-retry on same model.
 	 * 3. Output incomplete (stopReason === "length", e.g. `response.incomplete`): the
-	 *    model burned its output budget without producing an actionable deliverable
-	 *    (reasoning-only or truncated). Drop the dead turn, try promotion, otherwise
-	 *    run compaction/handoff and retry.
+	 *    model exhausted its output budget. Try promotion; otherwise compact and
+	 *    retry when the context is over threshold (the window, not the output cap,
+	 *    ran out), retry as-is when the turn produced nothing actionable, and
+	 *    keep a truncated deliverable with a warning otherwise.
 	 * 4. Threshold: context over threshold, run context maintenance (no auto-retry).
 	 *
 	 * @param assistantMessage The assistant message to check
@@ -2790,11 +2853,11 @@ export class SessionMaintenance {
 		}
 
 		// Case 3: Output-side incomplete — `response.incomplete` from OpenAI Responses
-		// (and Codex) maps to stopReason === "length". The model burned its
-		// `max_output_tokens` budget on reasoning/text and emitted no actionable
-		// deliverable. Same recovery class as overflow: promotion if available,
-		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so a
-		// reachable handoff preference may run.
+		// (and Codex), Anthropic `max_tokens` / `model_context_window_exceeded`, all
+		// map to stopReason === "length". Promotion if available; compaction only
+		// when the window is what ran out, since shrinking the input cannot raise an
+		// output cap. Unlike overflow, the *input* is fine, so a reachable handoff
+		// preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
 			if (this.#incompleteRecoveryRetryCount() >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
 				const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
@@ -2830,7 +2893,6 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_CONTINUATION;
 			}
 
-			const incompleteCompactionSettings = cfgCompaction.get(this.#host.settings);
 			if (
 				incompleteCompactionSettings.enabled &&
 				(this.#usesExperimentalContextManagement() ||
@@ -3805,6 +3867,7 @@ export class SessionMaintenance {
 				}),
 			},
 		);
+		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();

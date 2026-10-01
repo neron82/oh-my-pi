@@ -6,6 +6,8 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -24,13 +26,13 @@ import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { showGitOverlay } from "../../cli/git-tui";
 import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { acquireModelRoleMutation, modelPresetSavedMessage, saveModelPreset } from "../../config/model-presets";
 import { resolveAdvisorRoleSelection, resolveModelRoleValue } from "../../config/model-resolver";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
 import { createSettingsHost } from "../../config/settings-ui";
 import { createPluginSettingsHost } from "../../extensibility/plugins/settings-host";
-import type { disableProvider as DisableProvider, enableProvider as EnableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	getInstalledPluginsRegistryPath,
@@ -61,6 +63,12 @@ import { toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import {
+	accountIdentityLabel,
+	collectStoredAccounts,
+	collectUnreportedAccounts,
+	selectReportableAccounts,
+} from "../../slash-commands/helpers/usage-accounts";
 import { loadDailyActivity } from "../../stats/activity-client";
 import {
 	AUTO_THINKING,
@@ -103,7 +111,6 @@ import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-m
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
 import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
-import { renderSegmentTrack } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
@@ -113,6 +120,7 @@ import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboa
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
+import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
@@ -130,8 +138,6 @@ import {
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
-
-const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
 interface ModelOverlayModules {
 	ModelHubComponent: typeof ModelHubComponentType;
@@ -166,17 +172,6 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 	};
 }
 
-interface ProviderToggleModules {
-	disableProvider: typeof DisableProvider;
-	enableProvider: typeof EnableProvider;
-}
-
-/** Settings-only boundary for provider discovery mutations. */
-function loadProviderToggles(): ProviderToggleModules {
-	const discovery = require("../../discovery");
-	return { disableProvider: discovery.disableProvider, enableProvider: discovery.enableProvider };
-}
-
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -196,14 +191,12 @@ export class SelectorController {
 		return handle;
 	}
 
-	#defaultRoleMutationTail = Promise.resolve();
-
+	/**
+	 * Serialize default-role mutations with `/modelpreset switch`, which holds the
+	 * same shared tail in `config/model-presets.ts` for its whole apply.
+	 */
 	async #acquireDefaultRoleMutation(): Promise<() => void> {
-		const previous = this.#defaultRoleMutationTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		this.#defaultRoleMutationTail = previous.then(() => promise);
-		await previous;
-		return resolve;
+		return acquireModelRoleMutation();
 	}
 
 	async #refreshOAuthProviderAuthState(): Promise<void> {
@@ -314,6 +307,7 @@ export class SelectorController {
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
 						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
 					},
+					describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
 						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
@@ -351,6 +345,19 @@ export class SelectorController {
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
 	showUsageDashboard(reports: UsageReport[]): void {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const accounts = selectReportableAccounts(
+			collectStoredAccounts(authStorage),
+			provider => authStorage.usage.providerFor(provider) !== undefined,
+		);
+		if (reports.length === 0 && accounts.length === 0) {
+			this.ctx.showWarning("No usage data available.");
+			return;
+		}
+		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+			provider: account.provider,
+			label: accountIdentityLabel(account),
+		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
@@ -363,16 +370,19 @@ export class SelectorController {
 		};
 		const dashboard = new UsageDashboardComponent({
 			reports,
-			renderDetail: width =>
+			unavailableAccounts,
+			renderDetail: (width, current) =>
 				renderUsageReports(
-					reports,
+					current,
 					theme,
 					Date.now(),
 					width,
 					provider => (provider === currentProvider ? activeAccount : undefined),
 					usageModelSelectors,
+					unavailableAccounts,
 				),
 			loadActivity: loadDailyActivity,
+			refresh: () => this.ctx.session.fetchUsageReports(),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});
@@ -421,6 +431,7 @@ export class SelectorController {
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
+				syncBacklog: cfgAdvisorSyncBacklog.get(this.ctx.settings),
 				defaultModelLabel: defaultAdvisorModel
 					? `${defaultAdvisorModel.provider}/${defaultAdvisorModel.id}`
 					: undefined,
@@ -590,24 +601,17 @@ export class SelectorController {
 	}
 
 	/**
-	 * Apply the remaining imperative side effects of a setting change (settings
-	 * selector, `cfg://` writes). Values are already stored by the caller.
+	 * Apply the side effects of a setting change the user made in this process
+	 * (settings selector, approved `cfg://` writes); the value is already stored.
+	 * Only `defaultThinkingLevel` needs this: it also switches the live session,
+	 * which config reloads and parent-session writes must not do. Every other
+	 * setting applies through handle listeners owned by the session and InteractiveMode.
 	 */
 	handleSettingChange(id: string, value: unknown): void {
-		// Discovery provider toggles
-		if (id.startsWith("discovery.")) {
-			const providerId = id.replace("discovery.", "");
-			const { disableProvider, enableProvider } = loadProviderToggles();
-			if (value) {
-				enableProvider(providerId);
-			} else {
-				disableProvider(providerId);
-			}
-			return;
-		}
-
-		// Everything else applies through setting-handle listeners owned by
-		// the session and InteractiveMode, so non-UI `set()` paths stay live too.
+		if (id !== cfgDefaultThinkingLevel.id || typeof value !== "string") return;
+		const level = parseConfiguredThinkingLevel(value);
+		if (level === undefined || level === this.ctx.session.configuredThinkingLevel()) return;
+		this.ctx.session.setThinkingLevel(level);
 	}
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
@@ -655,7 +659,7 @@ export class SelectorController {
 			await this.ctx.session.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
-			const roleSelectorHint = this.ctx.keybindings.getKeys("app.model.select")[0] ?? "Alt+M";
+			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
 			this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
 		};
 		if (!compactFirst) {
@@ -719,10 +723,8 @@ export class SelectorController {
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						this.ctx.showModelCycleTrack(
-							renderSegmentTrack(
-								quickRoleOrder.map(role => ({ label: role })),
-								quickRoleOrder.indexOf(entry.role),
-							),
+							quickRoleOrder.map(role => ({ label: role })),
+							quickRoleOrder.indexOf(entry.role),
 						);
 						done();
 					} catch (error) {
@@ -745,7 +747,6 @@ export class SelectorController {
 				currentContextTokens,
 				currentSelector,
 				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
-				taskModeKeyLabel: this.ctx.keybindings.getDisplayString("app.model.selectTemporary") || "alt+p",
 				taskSelector,
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
@@ -954,13 +955,7 @@ export class SelectorController {
 				},
 				onFallbackChainChange: (role, chain) => {
 					try {
-						const chains = { ...cfgRetryFallbackChains.get(this.ctx.settings) };
-						if (chain.length === 0) {
-							delete chains[role];
-						} else {
-							chains[role] = chain;
-						}
-						cfgRetryFallbackChains.set(this.ctx.settings, chains);
+						cfgRetryFallbackChains.setEntry(this.ctx.settings, role, chain.length > 0 ? chain : undefined);
 						const roleInfo = getRoleInfo(role, settings);
 						this.ctx.showStatus(
 							chain.length > 0
@@ -986,10 +981,21 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
+				onSavePreset: name => {
+					try {
+						saveModelPreset(this.ctx.settings, name);
+						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
 				onCancel: () => done(),
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
+				currentSelector: this.ctx.session.model
+					? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}`
+					: undefined,
 			},
 		);
 		const overlayHandle = this.#showFullscreenMenu(hub);
@@ -1365,7 +1371,7 @@ export class SelectorController {
 							this.ctx.ui,
 							spinner => theme.fg("accent", spinner),
 							text => theme.fg("muted", text),
-							"Summarizing branch... (esc to cancel)",
+							`Summarizing branch... (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`,
 							getSymbolTheme().spinnerFrames,
 						);
 						this.ctx.statusContainer.addChild(summaryLoader);
@@ -1452,6 +1458,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				cfgTreeFilterMode.get(settings),
+				this.ctx.sessionManager.getSessionName(),
 			);
 			return { component: selector, focus: selector };
 		});
@@ -1844,7 +1851,11 @@ export class SelectorController {
 				// editor's `/login <url>` path is unreachable while the dialog holds
 				// focus (#5339).
 				onManualCodeInput: useManualInput
-					? signal => dialog.showManualInput(MANUAL_LOGIN_PROMPT, signal)
+					? signal =>
+							dialog.showManualInput(
+								`Paste the authorization code (or full redirect URL), then press ${editorKey("tui.input.submit")}:`,
+								signal,
+							)
 					: undefined,
 			});
 			// Scope the post-login refresh to the just-authenticated provider with an
