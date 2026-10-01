@@ -99,7 +99,7 @@ function createHost(model: Model, modelRegistry: ModelRegistry, capture: Capture
 		sessionMessageAlreadyPersisted: () => false,
 		setModelWithProviderSessionReset: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemReset: async () => false,
+		maybeAutoRedeemReset: async () => ({ restored: false }),
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),

@@ -665,7 +665,10 @@ async function runInteractiveMode(
 				recentSessions: startupLease?.recentSessions,
 			}),
 		);
-		void startBackgroundModelDiscovery?.();
+		// Also runs the fork-safe background model discovery it wraps, after the
+		// first frame; the deferred-run recovery below must stay after the TUI is
+		// subscribed so resumed-turn events reach the host.
+		startDeferredStartupWork?.();
 		// Recover deferred runs after the TUI is subscribed so resumed-turn events reach the host.
 		await session.resumeDeferredRuns();
 

@@ -170,7 +170,7 @@ same requests are simply fully prefilled.
   byte estimate.
 - **Session dump:** `formatSessionDumpText` gains a `prompt-cache` section with
   the per-request reports for the current run.
-- **OTEL:** chat spans carry `pi.prompt_stability.*` attributes (stable-prefix
+- **OTEL:** chat spans carry `omp.gen_ai.prompt_stability.*` attributes (stable-prefix
   bytes, first divergence, cause flags, estimated ratio) alongside the existing
   `gen_ai.usage.cache_read.input_tokens`.
 - **API:** `agent.stabilityMonitor.last()` / `.history(n)` for programmatic access

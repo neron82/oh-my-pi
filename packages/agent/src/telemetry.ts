@@ -161,20 +161,26 @@ export const enum OmpGenAIAttr {
 	GatewayCallId = "omp.gen_ai.gateway.call_id",
 	GatewayRoutedTo = "omp.gen_ai.gateway.routed_to",
 	/** Cloudflare AI Gateway response-cache status (`cf-aig-cache-status`), never prompt-cache. */
-	GatewayResponseCacheStatus = "pi.gen_ai.gateway.response_cache.status",
+	GatewayResponseCacheStatus = "omp.gen_ai.gateway.response_cache.status",
+	/** Caller-level reason a judgment ran (`find`, `ttsr`, `judge_batch`, …). */
+	JudgmentPurpose = "omp.gen_ai.judgment.purpose",
+	/** Questions the caller asked in one judgment request. */
+	JudgmentQuestions = "omp.gen_ai.judgment.questions",
+	/** Questions answered from the local judgment cache instead of the provider. */
+	JudgmentCachedQuestions = "omp.gen_ai.judgment.cached_questions",
 	// Prompt stability (see prompt-stability.ts): how much of this request's
 	// serialized prompt was already established by the previous request of
 	// the same agent. Distinct from provider prompt-cache token counters
 	// (`gen_ai.usage.cache_*`), which measure what the backend actually
 	// served from cache; these describe the harness-side guarantee.
-	PromptStabilityTotalBytes = "pi.gen_ai.prompt_stability.total_bytes",
-	PromptStabilityStablePrefixBytes = "pi.gen_ai.prompt_stability.stable_prefix_bytes",
-	PromptStabilityFirstDivergence = "pi.gen_ai.prompt_stability.first_divergence",
-	PromptStabilityEstimatedCacheHitRatio = "pi.gen_ai.prompt_stability.estimated_cache_hit_ratio",
-	PromptStabilityActualCacheHitRatio = "pi.gen_ai.prompt_stability.actual_cache_hit_ratio",
-	PromptStabilitySystemChanged = "pi.gen_ai.prompt_stability.system_changed",
-	PromptStabilityToolsChanged = "pi.gen_ai.prompt_stability.tools_changed",
-	PromptStabilityPrefixRebuilt = "pi.gen_ai.prompt_stability.prefix_rebuilt",
+	PromptStabilityTotalBytes = "omp.gen_ai.prompt_stability.total_bytes",
+	PromptStabilityStablePrefixBytes = "omp.gen_ai.prompt_stability.stable_prefix_bytes",
+	PromptStabilityFirstDivergence = "omp.gen_ai.prompt_stability.first_divergence",
+	PromptStabilityEstimatedCacheHitRatio = "omp.gen_ai.prompt_stability.estimated_cache_hit_ratio",
+	PromptStabilityActualCacheHitRatio = "omp.gen_ai.prompt_stability.actual_cache_hit_ratio",
+	PromptStabilitySystemChanged = "omp.gen_ai.prompt_stability.system_changed",
+	PromptStabilityToolsChanged = "omp.gen_ai.prompt_stability.tools_changed",
+	PromptStabilityPrefixRebuilt = "omp.gen_ai.prompt_stability.prefix_rebuilt",
 }
 
 /** GenAI operation names — values for {@link GenAIAttr.OperationName}. */
@@ -1265,16 +1271,16 @@ export function applyPromptStabilityAttributes(
 	report: PromptStabilityReport | undefined,
 ): void {
 	if (!span || !report) return;
-	span.setAttribute(PiGenAIAttr.PromptStabilityTotalBytes, report.totalBytes);
-	span.setAttribute(PiGenAIAttr.PromptStabilityStablePrefixBytes, report.stablePrefixBytes);
-	span.setAttribute(PiGenAIAttr.PromptStabilityFirstDivergence, report.firstDivergence);
-	span.setAttribute(PiGenAIAttr.PromptStabilityEstimatedCacheHitRatio, report.estimatedCacheHitRatio);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityTotalBytes, report.totalBytes);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityStablePrefixBytes, report.stablePrefixBytes);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityFirstDivergence, report.firstDivergence);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityEstimatedCacheHitRatio, report.estimatedCacheHitRatio);
 	if (report.actualCacheHitRatio != null) {
-		span.setAttribute(PiGenAIAttr.PromptStabilityActualCacheHitRatio, report.actualCacheHitRatio);
+		span.setAttribute(OmpGenAIAttr.PromptStabilityActualCacheHitRatio, report.actualCacheHitRatio);
 	}
-	span.setAttribute(PiGenAIAttr.PromptStabilitySystemChanged, report.systemChanged);
-	span.setAttribute(PiGenAIAttr.PromptStabilityToolsChanged, report.toolsChanged);
-	span.setAttribute(PiGenAIAttr.PromptStabilityPrefixRebuilt, report.prefixRebuilt);
+	span.setAttribute(OmpGenAIAttr.PromptStabilitySystemChanged, report.systemChanged);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityToolsChanged, report.toolsChanged);
+	span.setAttribute(OmpGenAIAttr.PromptStabilityPrefixRebuilt, report.prefixRebuilt);
 }
 
 /**

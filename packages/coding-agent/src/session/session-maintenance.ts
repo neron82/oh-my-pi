@@ -89,7 +89,7 @@ import {
 	resolveMethodSettings,
 	resolveSpeculationMethod,
 } from "./compaction-methods";
-import { convertToLlm, stripImagesFromMessage } from "./messages";
+import { assistantTurnDelivered, convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -2859,17 +2859,42 @@ export class SessionMaintenance {
 		// output cap. Unlike overflow, the *input* is fine, so a reachable handoff
 		// preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
-			if (this.#incompleteRecoveryRetryCount() >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
+			const incompleteCompactionSettings = cfgCompaction.get(this.#host.settings);
+			const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
+			// Unknown windows keep compacting: there is no evidence the window had room.
+			const windowExhausted =
+				contextWindow <= 0 ||
+				incompleteContextTokens > resolveThresholdTokens(contextWindow, incompleteCompactionSettings);
+			if (!windowExhausted && assistantTurnDelivered(assistantMessage)) {
+				// The output cap truncated a real deliverable with the window still open:
+				// neither a larger window nor compaction buys output room, and a retry
+				// would regenerate the same truncation. Keep it and let the user steer.
+				logger.warn("response.incomplete: output cap reached below compaction threshold; keeping truncated turn", {
+					model: `${assistantMessage.provider}/${assistantMessage.model}`,
+					contextTokens: incompleteContextTokens,
+					outputTokens: assistantMessage.usage.output,
+				});
+				this.#host.emitNotice(
+					"warning",
+					`Response hit the ${assistantMessage.provider}/${assistantMessage.model} output limit (${assistantMessage.usage.output} tokens) and was truncated.`,
+					"compaction",
+				);
+				return COMPACTION_CHECK_NONE;
+			}
+
+			const incompleteRetries = this.#incompleteRecoveryRetryCount();
+			if (incompleteRetries >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
 				const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
-				const notice =
-					`Response stopped because it reached its length limit ${INCOMPLETE_RECOVERY_MAX_RETRIES + 1} times in a row; ` +
-					"automatic recovery has paused to avoid an infinite retry loop.";
-				logger.warn("Incomplete response recovery retry limit reached", {
+				const finalError = `Length-stop recovery gave up after ${incompleteRetries} consecutive \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model} with no text or tool call. Try switching models or raising the model's max output tokens.`;
+				logger.warn("response.incomplete recovery cap reached; halting retries", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					maxRetries: INCOMPLETE_RECOVERY_MAX_RETRIES,
+					attempts: incompleteRetries,
 				});
-				this.#host.emitNotice("error", notice, "compaction");
+				this.#host.emitNotice("error", finalError, "compaction");
+				// Without this the dropped turn leaves no error behind, so the task
+				// executor reads the run as idle and re-prompts it into the same loop.
+				this.#host.retainTerminalFailure({ ...assistantMessage, stopReason: "error", errorMessage: finalError });
 				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
 
@@ -2898,6 +2923,40 @@ export class SessionMaintenance {
 				(this.#usesExperimentalContextManagement() ||
 					hasUsableCompactionMethod("incomplete", this.#model, incompleteCompactionSettings))
 			) {
+				if (!windowExhausted) {
+					// Nothing delivered and the window still has room: compaction would
+					// only rewrite history the next attempt does not need shrunk.
+					await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					await this.#recordIncompleteRecoveryRetry(undefined);
+					const retryCount = this.#incompleteRecoveryRetryCount();
+					// The dropped turn spent the output cap on reasoning. Re-sending the
+					// same context re-runs the same plan into the same cap, so tell the
+					// model what happened and to act in smaller steps.
+					if (assistantMessage.usage.output > 0) {
+						this.#host.agent.appendMessage({
+							role: "developer",
+							content: [
+								{
+									type: "text",
+									text: prompt.render(lengthStopRetryTemplate, {
+										outputTokens: assistantMessage.usage.output,
+										retryCount,
+										maxRetries: INCOMPLETE_RECOVERY_MAX_RETRIES,
+									}),
+								},
+							],
+							attribution: "agent",
+							timestamp: Date.now(),
+						});
+					}
+					logger.debug("Retrying response.incomplete without compaction (below threshold)", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						contextTokens: incompleteContextTokens,
+						attempt: retryCount,
+					});
+					this.#host.scheduleAgentContinue({ source: "incomplete-retry", delayMs: 100, generation });
+					return COMPACTION_CHECK_CONTINUATION;
+				}
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
@@ -3958,15 +4017,40 @@ export class SessionMaintenance {
 		let method: CompactionMethod | undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
-			const available =
-				candidate === "remote"
-					? canUseRemoteCompaction(this.#model, resolveMethodSettings(compactionSettings, candidate))
-					: candidate === "snapcompact"
-						? !options.excludeMediaMethods && this.#model?.input.includes("image") === true
-						: candidate === "handoff"
-							? reason !== "overflow"
-							: true;
-			if (!available) continue;
+			if (
+				!isCompactionMethodUsable(
+					candidate,
+					reason,
+					this.#model,
+					compactionSettings,
+					options.excludeMediaMethods === true,
+				)
+			)
+				continue;
+			// Re-sending a native request that just failed for good only delays the
+			// fallback. Skip it while a later method can still run.
+			const liveModel = this.#model;
+			if (
+				candidate === "remote" &&
+				liveModel &&
+				this.#nativeSpeculationFailed(liveModel) &&
+				methods
+					.slice(index + 1)
+					.some(next =>
+						isCompactionMethodUsable(
+							next,
+							reason,
+							liveModel,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
+					)
+			) {
+				logger.debug("Skipping native compaction after a failed speculative attempt", {
+					model: `${liveModel.provider}/${liveModel.id}`,
+				});
+				continue;
+			}
 			method = candidate;
 			methodIndex = index;
 			break;

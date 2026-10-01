@@ -33,7 +33,7 @@ hope.
   instead of an unrelated text blob.
 - **Observability.** A per-request `PromptStabilityMonitor` report (stable
   bytes, first divergence, cause) in the debug log, a `prompt-cache` section
-  in the session dump, `pi.gen_ai.prompt_stability.*` span attributes, and a
+  in the session dump, `omp.gen_ai.prompt_stability.*` span attributes, and a
   measured usage row under the status bar (`statusLine.usageLine`: live tok/s,
   provider-reported cache-hit rate, session totals).
 - **Proof.** `packages/coding-agent/scripts/prompt-cache-benchmark.ts` drives a

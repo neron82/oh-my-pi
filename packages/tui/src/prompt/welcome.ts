@@ -691,6 +691,18 @@ export const PI_LOGO = ["████████████", "   ██  █�
  */
 export const DEEPSEEK_LOGO = ['   .-""-.  ', "  /  _  \\  ", " |  (_)  | ", "  \\  ^  /  ", "   '-..-'  "];
 
+/** The block-grid brand mark as accent lines; `shimmer` declares the terminal-clocked shine sweep. */
+export function logoNode(lines: readonly string[], shimmer: boolean): NativeNode {
+	return col(
+		lines.map(line =>
+			text([span(line, "accent", shimmer ? { fx: "shimmer" } : undefined)], {
+				wrap: "none",
+			}),
+		),
+		{ align: "center", role: "omp.setup.logo" },
+	);
+}
+
 /** Multi-stop palette for the diagonal gradient. */
 const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
 	[248, 79, 204], // oklch(0.7 0.24 340)

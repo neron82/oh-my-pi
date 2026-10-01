@@ -2754,7 +2754,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			nowMs,
 			previewTitle,
 		);
-		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
 		// Second row under the bar: live tok/s, provider-reported cache-hit
 		// rate, and cumulative session input/output — all measured usage.
 		this.#usageStatLine = formatUsageStatLine(ctx.usageStats);

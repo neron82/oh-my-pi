@@ -11,6 +11,7 @@
 ### Changed
 
 - Advisor notes merge at final boundaries with age markers and at most one permitted continuation per batch; advisor continuations no longer trigger recursive reviews ([#12387](https://github.com/can1357/oh-my-pi/pull/12387) by [@olegpulatov](https://github.com/olegpulatov)).
+- Renamed the prompt-stability OTEL span attributes from `pi.gen_ai.prompt_stability.*` to `omp.gen_ai.prompt_stability.*`, matching the namespace upstream migrated every other `gen_ai` attribute to.
 
 ### Fixed
 
