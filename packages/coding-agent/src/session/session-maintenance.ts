@@ -530,6 +530,8 @@ export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
 	#manualCompactionCleanup: Promise<void> | undefined;
+	/** Resolves after a manual handoff commits or fails; blocks prompts while its history snapshot is pending. */
+	#handoffCleanup: Promise<void> | undefined;
 	/** Dispatches holding an unreleased claim while a manual compaction settles. */
 	#promptsAwaitingCleanup = 0;
 	/** Interrupted-turn resume withheld until every parked prompt reports its outcome. */
@@ -1838,12 +1840,12 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Park an ordinary prompt until manual compaction reconnects the agent and
-	 * re-drains preserved queues. The returned release reports whether this
+	 * Park a prompt until manual compaction reconnects the agent or a manual
+	 * handoff finishes committing its history. The returned release reports whether this
 	 * dispatch started a turn; callers must invoke it after the prompt settles.
 	 */
-	async waitForManualCompactionCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
-		const cleanup = this.#manualCompactionCleanup;
+	async waitForManualMaintenanceCleanup(): Promise<((startedTurn: boolean) => void) | undefined> {
+		const cleanup = this.#manualCompactionCleanup ?? this.#handoffCleanup;
 		if (!cleanup) return this.claimPendingResume();
 		const release = this.#claimResume();
 		await cleanup;
@@ -2750,15 +2752,10 @@ export class SessionMaintenance {
 
 			// No promotion target available fall through to compaction
 			if (compactionAvailable) {
-				const compactionResult = await this.#host.runRecoveryCompactionWithRollback(
-					"overflow",
-					assistantMessage,
-					allowDefer,
-					{
-						autoContinue,
-						excludeMediaMethods: excludeMediaForPayloadRejection,
-					},
-				);
+				const compactionResult = await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, {
+					autoContinue,
+					excludeMediaMethods: excludeMediaForPayloadRejection,
+				});
 				if (
 					payloadRejection &&
 					!compactionResult.continuationScheduled &&
@@ -2960,15 +2957,10 @@ export class SessionMaintenance {
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
 				});
 				const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-				const result = await this.#host.runRecoveryCompactionWithRollback(
-					"incomplete",
-					assistantMessage,
-					allowDefer,
-					{
-						autoContinue,
-						triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-					},
-				);
+				const result = await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, {
+					autoContinue,
+					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
+				});
 				if (result.continuationScheduled && result.historyRewritten === true) {
 					const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 					await this.#recordIncompleteRecoveryRetry(

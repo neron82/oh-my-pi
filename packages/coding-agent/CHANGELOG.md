@@ -12,6 +12,12 @@
 - Sped up secret redaction on long conversations: it no longer slows down as history grows ([#14213](https://github.com/can1357/oh-my-pi/pull/14213) by [@H4vC](https://github.com/H4vC))
 - Startup is faster with plugins that bundle large dependency trees: the extension loader no longer re-reads and re-checks the same files while loading them (e.g. ~280 ms → ~185 ms with the IDA MCP plugin) ([#14219](https://github.com/can1357/oh-my-pi/pull/14219) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Fixed prompts starting before manual handoff completed and restored valid JSON in session dump archives after upstream integration.
+- RPC clients now receive deferred-resume lifecycle events, with matching TypeScript, Python, Rust, and Go wire definitions.
+- Fork updates now verify GitHub action dependencies, test current native addons and committed Rust changes, and stop publication until integration fixes are committed.
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

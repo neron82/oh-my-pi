@@ -334,138 +334,25 @@ export class WelcomeComponent implements Component {
 	}
 
 	#renderLines(termWidth: number): string[] {
-		// Box dimensions - responsive with max width and small-terminal support
-		const maxWidth = 100;
-		const boxWidth = Math.min(maxWidth, Math.max(0, termWidth - 2));
-		if (boxWidth < 4) {
-			return [];
+		// Content keeps a column clear on each side; everything centers in the full width.
+		const room = termWidth - 2;
+		if (room < 4) return [];
+		const logo = this.#currentLogoFrame();
+		const version = theme.fg("dim", `v${this.version}`);
+		const lockupWidth = LOGO_WIDTH + LOCKUP_GAP + Math.max(WORDMARK_WIDTH, visibleWidth(version));
+		const art = room >= lockupWidth ? lockup(logo, version) : room >= LOGO_WIDTH ? logo : [];
+		const lines = centerBlock(art, termWidth);
+		if (room >= LOGO_WIDTH) {
+			lines.push(
+				"",
+				...centerBlock(
+					DEEPSEEK_LOGO.map(line => theme.fg("dim", line)),
+					termWidth,
+				),
+			);
 		}
-		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
-		const preferredLeftCol = 26;
-		const minLeftCol = 12; // logo width
-		const minRightCol = 20;
-		// Dynamic model/provider labels are truncated inside the fixed column.
-		// Letting them influence the responsive breakpoint changes the box height
-		// when authoritative session data replaces the empty prepaint labels.
-		const leftMinContentWidth = Math.max(minLeftCol, visibleWidth("Welcome back!"));
-		const desiredLeftCol = Math.max(
-			Math.min(preferredLeftCol, Math.max(minLeftCol, Math.floor(dualContentWidth * 0.35))),
-			leftMinContentWidth,
-		);
-		const dualLeftCol =
-			dualContentWidth >= minRightCol + 1
-				? Math.min(desiredLeftCol, dualContentWidth - minRightCol)
-				: Math.max(1, dualContentWidth - 1);
-		const dualRightCol = Math.max(1, dualContentWidth - dualLeftCol);
-		const showRightColumn = dualLeftCol >= leftMinContentWidth && dualRightCol >= minRightCol;
-		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
-		const rightCol = showRightColumn ? dualRightCol : 0;
-
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
-
-		// Left column - centered content
-		const leftLines = [
-			"",
-			this.#centerText(theme.bold("Welcome back!"), leftCol),
-			"",
-			...logoColored.map(l => this.#centerText(l, leftCol)),
-			"",
-			this.#centerText(theme.fg("muted", this.modelName), leftCol),
-			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
-			"",
-			...DEEPSEEK_LOGO.map(l => this.#centerText(theme.fg("dim", l), leftCol)),
-		];
-
-		// Right column separator
-		const separatorWidth = Math.max(0, rightCol - 2); // padding on each side
-		const separator = ` ${theme.fg("dim", theme.boxRound.horizontal.repeat(separatorWidth))}`;
-
-		// Recent sessions content
-		const sessionLines: string[] = [];
-		if (this.recentSessions.length === 0) {
-			sessionLines.push(` ${theme.fg("dim", "No recent sessions")}`);
-		} else {
-			// Reserve width for the bullet prefix (" • ") and the trailing " (timeAgo)"
-			// so the relative time is never the part that gets truncated. The name
-			// absorbs whatever space is left.
-			const bulletPrefix = ` ${theme.md.bullet} `;
-			const prefixWidth = visibleWidth(bulletPrefix);
-			for (const session of this.recentSessions.slice(0, WELCOME_SESSION_SLOTS)) {
-				const timeSuffixRaw = ` (${session.timeAgo})`;
-				const timeWidth = visibleWidth(timeSuffixRaw);
-				const nameBudget = Math.max(1, rightCol - prefixWidth - timeWidth);
-				const nameVis = visibleWidth(session.name);
-				const name = nameVis > nameBudget ? truncateToWidth(session.name, nameBudget) : session.name;
-				sessionLines.push(
-					`${theme.fg("dim", bulletPrefix)}${theme.fg("muted", name)}${theme.fg("dim", timeSuffixRaw)}`,
-				);
-			}
-		}
-		// Pad to the fixed slot count so the box height doesn't depend on session count.
-		while (sessionLines.length < WELCOME_SESSION_SLOTS) {
-			sessionLines.push("");
-		}
-
-		// Right column
-		const rightLines = [
-			` ${theme.bold(theme.fg("accent", "Tips"))}`,
-			` ${theme.fg("dim", "#")}${theme.fg("muted", " for prompt actions")}`,
-			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
-			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
-			` ${theme.fg("dim", "$")}${theme.fg("muted", " to run python")}`,
-			...this.#renderLspSection(separator),
-			separator,
-			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
-			...sessionLines,
-			"",
-		];
-
-		// Border characters (dim)
-		const hChar = theme.boxRound.horizontal;
-		const h = theme.fg("dim", hChar);
-		const v = theme.fg("dim", theme.boxRound.vertical);
-		const tl = theme.fg("dim", theme.boxRound.topLeft);
-		const tr = theme.fg("dim", theme.boxRound.topRight);
-		const bl = theme.fg("dim", theme.boxRound.bottomLeft);
-		const br = theme.fg("dim", theme.boxRound.bottomRight);
-
-		const lines: string[] = [];
-
-		// Top border with embedded title
-		const title = ` ${APP_NAME} v${this.version} `;
-		const titlePrefixRaw = hChar.repeat(3);
-		const titleStyled = theme.fg("dim", titlePrefixRaw) + theme.fg("muted", title);
-		const titleVisLen = visibleWidth(titlePrefixRaw) + visibleWidth(title);
-		const titleSpace = boxWidth - 2;
-		if (titleVisLen >= titleSpace) {
-			lines.push(tl + truncateToWidth(titleStyled, titleSpace) + tr);
-		} else {
-			const afterTitle = titleSpace - titleVisLen;
-			lines.push(tl + titleStyled + theme.fg("dim", hChar.repeat(afterTitle)) + tr);
-		}
-
-		// Content rows
-		const maxRows = showRightColumn ? Math.max(leftLines.length, rightLines.length) : leftLines.length;
-		for (let i = 0; i < maxRows; i++) {
-			const left = this.#fitToWidth(leftLines[i] ?? "", leftCol);
-			if (showRightColumn) {
-				const right = this.#fitToWidth(rightLines[i] ?? "", rightCol);
-				lines.push(v + left + v + right + v);
-			} else {
-				lines.push(v + left + v);
-			}
-		}
-		// Bottom border
-		if (showRightColumn) {
-			lines.push(bl + h.repeat(leftCol) + theme.fg("dim", theme.boxRound.teeUp) + h.repeat(rightCol) + br);
-		} else {
-			lines.push(bl + h.repeat(leftCol) + br);
-		}
-
-		// Randomly picked tip, rendered directly beneath the box.
-		lines.push(...this.#renderTip(boxWidth));
-
+		const tip = termWidth >= TIP_MIN_COLUMNS ? this.#renderTip(room) : [];
+		if (tip.length > 0) lines.push("", ...tip.flatMap(line => centerBlock([line], termWidth)));
 		return lines;
 	}
 
@@ -497,11 +384,47 @@ export class WelcomeComponent implements Component {
 export const PI_LOGO = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
 
 /**
- * Small ASCII whale (DeepSeek's mark) rendered beneath the pi logo, model
- * name, and provider in the welcome box's left column. Kept narrow enough to
- * fit the minimum left-column width (12) so it never forces a reflow.
+ * Small ASCII whale (DeepSeek's mark) rendered beneath the welcome lockup.
+ * Kept within the logo width so narrow terminals never overflow.
  */
 export const DEEPSEEK_LOGO = ['   .-""-.  ', "  /  _  \\  ", " |  (_)  | ", "  \\  ^  /  ", "   '-..-'  "];
+
+/** Columns of {@link PI_LOGO}. */
+const LOGO_WIDTH = Math.max(...PI_LOGO.map(row => row.length));
+
+/**
+ * The `omp` wordmark in half-blocks, set beside {@link PI_LOGO} from its second
+ * row: the `p` descends into the fourth, the version takes the fifth.
+ */
+const WORDMARK = ["▄▀▀▄ █▀▄▀▄ █▀▀▄", "▀▄▄▀ █ █ █ █▄▄▀", "           █"];
+
+/** Columns of {@link WORDMARK}. */
+const WORDMARK_WIDTH = Math.max(...WORDMARK.map(row => row.length));
+
+/** Columns between the logo and the wordmark. */
+const LOCKUP_GAP = 4;
+
+/** Widest a welcome tip wraps, so a long one stays a centered paragraph. */
+const TIP_MEASURE = 72;
+
+/** Narrowest terminal that still shows the tip; below it the banner is the logo alone. */
+const TIP_MIN_COLUMNS = 50;
+
+/** Logo frame `logo` with the wordmark beside it and `version` (styled) under the wordmark. */
+function lockup(logo: readonly string[], version: string): string[] {
+	const beside = ["", ...WORDMARK.map(row => theme.bold(theme.fg("text", row))), version];
+	return logo.map((row, index) => `${row}${padding(LOCKUP_GAP)}${beside[index] ?? ""}`);
+}
+
+/**
+ * `lines` indented as one block whose widest line is centered in `width`
+ * columns; pass a single line to center it on its own.
+ */
+function centerBlock(lines: readonly string[], width: number): string[] {
+	const widest = lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+	const indent = padding(Math.max(0, Math.floor((width - widest) / 2)));
+	return lines.map(line => indent + line);
+}
 
 /** The block-grid brand mark as accent lines; `shimmer` declares the terminal-clocked shine sweep. */
 export function logoNode(lines: readonly string[], shimmer: boolean): NativeNode {

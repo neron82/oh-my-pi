@@ -3503,6 +3503,55 @@
 				"attempt"
 			]
 		},
+		"DeferredResumeScheduledEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "deferred_resume_scheduled"
+				},
+				"resumeAt": {
+					"type": "number"
+				},
+				"errorMessage": {
+					"type": "string"
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"resumeAt",
+				"errorMessage",
+				"reason"
+			]
+		},
+		"DeferredResumeCancelledEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "deferred_resume_cancelled"
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"reason"
+			]
+		},
+		"DeferredResumeCompletedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "deferred_resume_completed"
+				}
+			},
+			"required": [
+				"type"
+			]
+		},
 		"CacheWarmingStartEvent": {
 			"type": "object",
 			"properties": {
@@ -3867,6 +3916,15 @@
 				},
 				{
 					"$ref": "#/$defs/AutoRetryEndEvent"
+				},
+				{
+					"$ref": "#/$defs/DeferredResumeScheduledEvent"
+				},
+				{
+					"$ref": "#/$defs/DeferredResumeCancelledEvent"
+				},
+				{
+					"$ref": "#/$defs/DeferredResumeCompletedEvent"
 				},
 				{
 					"$ref": "#/$defs/CacheWarmingStartEvent"

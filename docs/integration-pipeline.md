@@ -43,10 +43,10 @@ The script runs the following stages, in order; each can be skipped:
    upstream has moved on from.
    `git rerere` is enabled, so a conflict you resolve by hand once is
    remembered and auto-resolved on the next integration.
-4. **Check** — re-installs dependencies when the merge changed any
-   `package.json`/`bun.lock`, runs the full type-check (`bun run check:ts`),
+4. **Check** — re-installs dependencies with `bun install --frozen-lockfile` when the merge changed any
+   `package.json`/`bun.lock`, validates the fork workflow’s local action dependencies, runs the full type-check (`bun run check:ts`), refreshes the host native addon before tests,
    the fork's stability test suite, and `bun run test:rs` when the merge
-   touched `crates/`. This is the safety net that catches upstream API churn
+   touched `crates/`. Rust checks run with `CI=true` so committed merge changes are tested even when the working tree is clean. This is the safety net that catches upstream API churn
    breaking fork code that the merge kept.
 5. **Build** — verifies the host native addon is fresh, then compiles the
    `omp` binary exactly like a local release build
@@ -191,17 +191,15 @@ and surface in `--help`.
 
 The script auto-stashes uncommitted work around the merge (like
 `git merge --autostash`), then pops it back **before** the build — the
-pipeline runs on the integrated code plus your work-in-progress, and your WIP
-is never committed or pushed. If the pop conflicts, the script stops with
+pipeline can run locally on the integrated code plus your work-in-progress with `--no-push`. A publishing run stops after restoring WIP until you commit it, so the verified and deployed tree matches the tree pushed to GitHub. Your WIP is never committed automatically. If the pop conflicts, the script stops with
 instructions. Pass `--no-stash` to refuse a dirty worktree instead.
-`--no-merge` modes (build/deploy of the current state) are fine with a dirty
-tree either way.
+`--no-merge --no-push` modes (local build/deploy of the current state) allow a dirty tree. Builds that regenerate tracked files also stop before deployment and push until those files are committed.
 
 ## CI verification (optional)
 
 `.github/workflows/fork-verify.yml` mirrors the local check stage on every
 push to `prompt-cache-stability`: it runs the integration-script contract
-tests, the fork stability suite, and the workspace type-check. It is a
+tests, the fork stability suite from `scripts/integrate/fork-paths.json`, and the workspace type-check. It uses Ubuntu 24.04, Node 24 checkout, the Bun version from `package.json`, and native addons matching the repository version. The local pipeline validates local action references, including dependencies of composite actions, before building. It is a
 verification net for merge commits — merges themselves always happen on your
 machine, since the deploy stage needs your local build environment.
 
@@ -235,3 +233,7 @@ protects now lives over there". Protection now follows the rename, the
 manifest regenerates rename-aware, and a protected path that upstream deleted
 outright stops the run with the likely new home named instead of silently
 resurrecting a file the tree no longer imports.
+
+## Recovering after failed verification
+
+A conflict resolution can be syntactically valid while retaining calls to methods upstream removed. The pipeline keeps the merge locally for review and stops before build, deployment and push. Fix the reported API or behavior errors, commit the fixes, then run `./update.sh --no-fetch --no-merge --backup`. The check stage compares against the last integration merge’s first parent, so dependency and Rust changes remain visible during recovery. A non-fast-forward fork push is an error, never a successful publication.

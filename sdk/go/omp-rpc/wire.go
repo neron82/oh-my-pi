@@ -3630,6 +3630,82 @@ func (v AutoRetryEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"auto_retry_end"`, nil)
 }
 
+type DeferredResumeScheduledEvent struct {
+	ResumeAt     float64 `json:"resumeAt"`
+	ErrorMessage string  `json:"errorMessage"`
+	Reason       string  `json:"reason"`
+}
+
+func (v *DeferredResumeScheduledEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DeferredResumeScheduledEvent", v.decodeFrom)
+}
+
+func (v *DeferredResumeScheduledEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DeferredResumeScheduledEvent
+	d := fieldDecoder{raw: raw, owner: "DeferredResumeScheduledEvent"}
+	d.constant("type", "deferred_resume_scheduled")
+	d.required("resumeAt", &out.ResumeAt)
+	d.required("errorMessage", &out.ErrorMessage)
+	d.required("reason", &out.Reason)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DeferredResumeScheduledEvent) MarshalJSON() ([]byte, error) {
+	type plain DeferredResumeScheduledEvent
+	return encodeObject(plain(v), `"type":"deferred_resume_scheduled"`, nil)
+}
+
+type DeferredResumeCancelledEvent struct {
+	Reason string `json:"reason"`
+}
+
+func (v *DeferredResumeCancelledEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DeferredResumeCancelledEvent", v.decodeFrom)
+}
+
+func (v *DeferredResumeCancelledEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DeferredResumeCancelledEvent
+	d := fieldDecoder{raw: raw, owner: "DeferredResumeCancelledEvent"}
+	d.constant("type", "deferred_resume_cancelled")
+	d.required("reason", &out.Reason)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DeferredResumeCancelledEvent) MarshalJSON() ([]byte, error) {
+	type plain DeferredResumeCancelledEvent
+	return encodeObject(plain(v), `"type":"deferred_resume_cancelled"`, nil)
+}
+
+type DeferredResumeCompletedEvent struct{}
+
+func (v *DeferredResumeCompletedEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "DeferredResumeCompletedEvent", v.decodeFrom)
+}
+
+func (v *DeferredResumeCompletedEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out DeferredResumeCompletedEvent
+	d := fieldDecoder{raw: raw, owner: "DeferredResumeCompletedEvent"}
+	d.constant("type", "deferred_resume_completed")
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v DeferredResumeCompletedEvent) MarshalJSON() ([]byte, error) {
+	type plain DeferredResumeCompletedEvent
+	return encodeObject(plain(v), `"type":"deferred_resume_completed"`, nil)
+}
+
 // A prompt-cache refresh was handed to the provider.
 type CacheWarmingStartEvent struct {
 	Phase    CacheWarmingPhase `json:"phase"`
@@ -4074,38 +4150,41 @@ type RpcAgentEventVariant interface {
 	isRpcAgentEvent()
 }
 
-func (AgentStartEvent) isRpcAgentEvent()             {}
-func (AgentEndEvent) isRpcAgentEvent()               {}
-func (TurnStartEvent) isRpcAgentEvent()              {}
-func (TurnEndEvent) isRpcAgentEvent()                {}
-func (MessageStartEvent) isRpcAgentEvent()           {}
-func (MessageUpdateEvent) isRpcAgentEvent()          {}
-func (MessageEndEvent) isRpcAgentEvent()             {}
-func (ToolExecutionStartEvent) isRpcAgentEvent()     {}
-func (ToolExecutionUpdateEvent) isRpcAgentEvent()    {}
-func (ToolStreamUpdateEvent) isRpcAgentEvent()       {}
-func (ToolExecutionEndEvent) isRpcAgentEvent()       {}
-func (AutoCompactionStartEvent) isRpcAgentEvent()    {}
-func (AutoCompactionEndEvent) isRpcAgentEvent()      {}
-func (AutoRetryStartEvent) isRpcAgentEvent()         {}
-func (AutoRetryEndEvent) isRpcAgentEvent()           {}
-func (CacheWarmingStartEvent) isRpcAgentEvent()      {}
-func (CacheWarmingEndEvent) isRpcAgentEvent()        {}
-func (RetryFallbackAppliedEvent) isRpcAgentEvent()   {}
-func (RetryFallbackSucceededEvent) isRpcAgentEvent() {}
-func (ModelChangedEvent) isRpcAgentEvent()           {}
-func (ConfigWarningsChangedEvent) isRpcAgentEvent()  {}
-func (AdvisorCostChangedEvent) isRpcAgentEvent()     {}
-func (AdvisorYieldedEvent) isRpcAgentEvent()         {}
-func (TtsrTriggeredEvent) isRpcAgentEvent()          {}
-func (TodoReminderEvent) isRpcAgentEvent()           {}
-func (TodoAutoClearEvent) isRpcAgentEvent()          {}
-func (IrcMessageEvent) isRpcAgentEvent()             {}
-func (NoticeEvent) isRpcAgentEvent()                 {}
-func (ThinkingLevelChangedEvent) isRpcAgentEvent()   {}
-func (GoalUpdatedEvent) isRpcAgentEvent()            {}
-func (QueueUpdateEvent) isRpcAgentEvent()            {}
-func (UnknownNotification) isRpcAgentEvent()         {}
+func (AgentStartEvent) isRpcAgentEvent()              {}
+func (AgentEndEvent) isRpcAgentEvent()                {}
+func (TurnStartEvent) isRpcAgentEvent()               {}
+func (TurnEndEvent) isRpcAgentEvent()                 {}
+func (MessageStartEvent) isRpcAgentEvent()            {}
+func (MessageUpdateEvent) isRpcAgentEvent()           {}
+func (MessageEndEvent) isRpcAgentEvent()              {}
+func (ToolExecutionStartEvent) isRpcAgentEvent()      {}
+func (ToolExecutionUpdateEvent) isRpcAgentEvent()     {}
+func (ToolStreamUpdateEvent) isRpcAgentEvent()        {}
+func (ToolExecutionEndEvent) isRpcAgentEvent()        {}
+func (AutoCompactionStartEvent) isRpcAgentEvent()     {}
+func (AutoCompactionEndEvent) isRpcAgentEvent()       {}
+func (AutoRetryStartEvent) isRpcAgentEvent()          {}
+func (AutoRetryEndEvent) isRpcAgentEvent()            {}
+func (DeferredResumeScheduledEvent) isRpcAgentEvent() {}
+func (DeferredResumeCancelledEvent) isRpcAgentEvent() {}
+func (DeferredResumeCompletedEvent) isRpcAgentEvent() {}
+func (CacheWarmingStartEvent) isRpcAgentEvent()       {}
+func (CacheWarmingEndEvent) isRpcAgentEvent()         {}
+func (RetryFallbackAppliedEvent) isRpcAgentEvent()    {}
+func (RetryFallbackSucceededEvent) isRpcAgentEvent()  {}
+func (ModelChangedEvent) isRpcAgentEvent()            {}
+func (ConfigWarningsChangedEvent) isRpcAgentEvent()   {}
+func (AdvisorCostChangedEvent) isRpcAgentEvent()      {}
+func (AdvisorYieldedEvent) isRpcAgentEvent()          {}
+func (TtsrTriggeredEvent) isRpcAgentEvent()           {}
+func (TodoReminderEvent) isRpcAgentEvent()            {}
+func (TodoAutoClearEvent) isRpcAgentEvent()           {}
+func (IrcMessageEvent) isRpcAgentEvent()              {}
+func (NoticeEvent) isRpcAgentEvent()                  {}
+func (ThinkingLevelChangedEvent) isRpcAgentEvent()    {}
+func (GoalUpdatedEvent) isRpcAgentEvent()             {}
+func (QueueUpdateEvent) isRpcAgentEvent()             {}
+func (UnknownNotification) isRpcAgentEvent()          {}
 
 func (v RpcAgentEvent) MarshalJSON() ([]byte, error) {
 	return encodeVariant("RpcAgentEvent", v.Value)
@@ -4156,6 +4235,12 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
 		value, err = decodeVariant[AutoRetryEndEvent](raw)
+	case "deferred_resume_scheduled":
+		value, err = decodeVariant[DeferredResumeScheduledEvent](raw)
+	case "deferred_resume_cancelled":
+		value, err = decodeVariant[DeferredResumeCancelledEvent](raw)
+	case "deferred_resume_completed":
+		value, err = decodeVariant[DeferredResumeCompletedEvent](raw)
 	case "cache_warming_start":
 		value, err = decodeVariant[CacheWarmingStartEvent](raw)
 	case "cache_warming_end":
@@ -6069,6 +6154,9 @@ func (AutoCompactionStartEvent) isRpcNotification()     {}
 func (AutoCompactionEndEvent) isRpcNotification()       {}
 func (AutoRetryStartEvent) isRpcNotification()          {}
 func (AutoRetryEndEvent) isRpcNotification()            {}
+func (DeferredResumeScheduledEvent) isRpcNotification() {}
+func (DeferredResumeCancelledEvent) isRpcNotification() {}
+func (DeferredResumeCompletedEvent) isRpcNotification() {}
 func (CacheWarmingStartEvent) isRpcNotification()       {}
 func (CacheWarmingEndEvent) isRpcNotification()         {}
 func (RetryFallbackAppliedEvent) isRpcNotification()    {}
@@ -6163,6 +6251,12 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
 		value, err = decodeVariant[AutoRetryEndEvent](raw)
+	case "deferred_resume_scheduled":
+		value, err = decodeVariant[DeferredResumeScheduledEvent](raw)
+	case "deferred_resume_cancelled":
+		value, err = decodeVariant[DeferredResumeCancelledEvent](raw)
+	case "deferred_resume_completed":
+		value, err = decodeVariant[DeferredResumeCompletedEvent](raw)
 	case "cache_warming_start":
 		value, err = decodeVariant[CacheWarmingStartEvent](raw)
 	case "cache_warming_end":
@@ -6253,6 +6347,9 @@ func (AutoCompactionStartEvent) isRpcServerFrame()     {}
 func (AutoCompactionEndEvent) isRpcServerFrame()       {}
 func (AutoRetryStartEvent) isRpcServerFrame()          {}
 func (AutoRetryEndEvent) isRpcServerFrame()            {}
+func (DeferredResumeScheduledEvent) isRpcServerFrame() {}
+func (DeferredResumeCancelledEvent) isRpcServerFrame() {}
+func (DeferredResumeCompletedEvent) isRpcServerFrame() {}
 func (CacheWarmingStartEvent) isRpcServerFrame()       {}
 func (CacheWarmingEndEvent) isRpcServerFrame()         {}
 func (RetryFallbackAppliedEvent) isRpcServerFrame()    {}
@@ -6357,6 +6454,12 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
 		value, err = decodeVariant[AutoRetryEndEvent](raw)
+	case "deferred_resume_scheduled":
+		value, err = decodeVariant[DeferredResumeScheduledEvent](raw)
+	case "deferred_resume_cancelled":
+		value, err = decodeVariant[DeferredResumeCancelledEvent](raw)
+	case "deferred_resume_completed":
+		value, err = decodeVariant[DeferredResumeCompletedEvent](raw)
 	case "cache_warming_start":
 		value, err = decodeVariant[CacheWarmingStartEvent](raw)
 	case "cache_warming_end":

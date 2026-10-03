@@ -976,6 +976,25 @@ class AutoRetryEndEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class DeferredResumeScheduledEvent:
+    type: Literal["deferred_resume_scheduled"] = "deferred_resume_scheduled"
+    resume_at: float
+    error_message: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DeferredResumeCancelledEvent:
+    type: Literal["deferred_resume_cancelled"] = "deferred_resume_cancelled"
+    reason: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DeferredResumeCompletedEvent:
+    type: Literal["deferred_resume_completed"] = "deferred_resume_completed"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class CacheWarmingStartEvent:
     """A prompt-cache refresh was handed to the provider."""
     type: Literal["cache_warming_start"] = "cache_warming_start"
@@ -1474,7 +1493,7 @@ AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent
 """Streaming update for one assistant message, discriminated by `type`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | DeferredResumeScheduledEvent | DeferredResumeCancelledEvent | DeferredResumeCompletedEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2202,6 +2221,31 @@ def parse_auto_retry_end_event(value: object, path: str = "AutoRetryEndEvent") -
     )
 
 
+def parse_deferred_resume_scheduled_event(value: object, path: str = "DeferredResumeScheduledEvent") -> DeferredResumeScheduledEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["deferred_resume_scheduled"]]', literal(frozenset({"deferred_resume_scheduled"}))), path)
+    return DeferredResumeScheduledEvent(
+        resume_at=required(payload, "resumeAt", decode_float, path),
+        error_message=required(payload, "errorMessage", decode_str, path),
+        reason=required(payload, "reason", decode_str, path),
+    )
+
+
+def parse_deferred_resume_cancelled_event(value: object, path: str = "DeferredResumeCancelledEvent") -> DeferredResumeCancelledEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["deferred_resume_cancelled"]]', literal(frozenset({"deferred_resume_cancelled"}))), path)
+    return DeferredResumeCancelledEvent(
+        reason=required(payload, "reason", decode_str, path),
+    )
+
+
+def parse_deferred_resume_completed_event(value: object, path: str = "DeferredResumeCompletedEvent") -> DeferredResumeCompletedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["deferred_resume_completed"]]', literal(frozenset({"deferred_resume_completed"}))), path)
+    return DeferredResumeCompletedEvent(
+    )
+
+
 def parse_cache_warming_start_event(value: object, path: str = "CacheWarmingStartEvent") -> CacheWarmingStartEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["cache_warming_start"]]', literal(frozenset({"cache_warming_start"}))), path)
@@ -2790,6 +2834,9 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "auto_compaction_end": parse_auto_compaction_end_event,
         "auto_retry_start": parse_auto_retry_start_event,
         "auto_retry_end": parse_auto_retry_end_event,
+        "deferred_resume_scheduled": parse_deferred_resume_scheduled_event,
+        "deferred_resume_cancelled": parse_deferred_resume_cancelled_event,
+        "deferred_resume_completed": parse_deferred_resume_completed_event,
         "cache_warming_start": parse_cache_warming_start_event,
         "cache_warming_end": parse_cache_warming_end_event,
         "retry_fallback_applied": parse_retry_fallback_applied_event,
@@ -2842,6 +2889,9 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "auto_compaction_end": parse_rpc_agent_event,
         "auto_retry_start": parse_rpc_agent_event,
         "auto_retry_end": parse_rpc_agent_event,
+        "deferred_resume_scheduled": parse_rpc_agent_event,
+        "deferred_resume_cancelled": parse_rpc_agent_event,
+        "deferred_resume_completed": parse_rpc_agent_event,
         "cache_warming_start": parse_rpc_agent_event,
         "cache_warming_end": parse_rpc_agent_event,
         "retry_fallback_applied": parse_rpc_agent_event,
@@ -3338,6 +3388,18 @@ class WireClient:
         """Subscribe to `auto_retry_end` frames."""
         return self._listen("auto_retry_end", listener)
 
+    def on_deferred_resume_scheduled(self, listener: Callable[[DeferredResumeScheduledEvent], None]) -> Callable[[], None]:
+        """Subscribe to `deferred_resume_scheduled` frames."""
+        return self._listen("deferred_resume_scheduled", listener)
+
+    def on_deferred_resume_cancelled(self, listener: Callable[[DeferredResumeCancelledEvent], None]) -> Callable[[], None]:
+        """Subscribe to `deferred_resume_cancelled` frames."""
+        return self._listen("deferred_resume_cancelled", listener)
+
+    def on_deferred_resume_completed(self, listener: Callable[[DeferredResumeCompletedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `deferred_resume_completed` frames."""
+        return self._listen("deferred_resume_completed", listener)
+
     def on_cache_warming_start(self, listener: Callable[[CacheWarmingStartEvent], None]) -> Callable[[], None]:
         """Subscribe to `cache_warming_start`: A prompt-cache refresh was handed to the provider."""
         return self._listen("cache_warming_start", listener)
@@ -3461,6 +3523,9 @@ __all__ = [
     "ConfirmUiRequest",
     "ContextUsage",
     "CustomMessage",
+    "DeferredResumeCancelledEvent",
+    "DeferredResumeCompletedEvent",
+    "DeferredResumeScheduledEvent",
     "DeveloperMessage",
     "EditorUiRequest",
     "Effort",
@@ -3632,6 +3697,9 @@ __all__ = [
     "parse_confirm_ui_request",
     "parse_context_usage",
     "parse_custom_message",
+    "parse_deferred_resume_cancelled_event",
+    "parse_deferred_resume_completed_event",
+    "parse_deferred_resume_scheduled_event",
     "parse_developer_message",
     "parse_editor_ui_request",
     "parse_extension_error",

@@ -94,6 +94,16 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (Bun.env.MOCK_RPC_DEFERRED_RESUME === "1" && frame.type === "get_state") {
+				writeFrame({
+					type: "deferred_resume_scheduled",
+					resumeAt: 1234,
+					errorMessage: "rate limit",
+					reason: "retry",
+				});
+				writeFrame({ type: "deferred_resume_cancelled", reason: "user prompt" });
+				writeFrame({ type: "deferred_resume_completed" });
+			}
 			if (Bun.env.MOCK_RPC_LATE_PROMPT_ERROR === "1" && frame.type === "prompt") {
 				writeFrame({ id, type: "response", command: "prompt", success: true });
 				writeFrame({

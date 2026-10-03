@@ -392,7 +392,8 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { formatSessionDumpText } from "./session-dump-format";
+import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
+import { collectSubSessions, type SubSession } from "./sub-sessions";
 import { DeferredRunManager } from "./deferred-run-manager";
 import { isImageInputRejection, withoutImageInput } from "./image-input-rejection";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
@@ -7011,7 +7012,7 @@ export class AgentSession implements SettingsScope {
 		// abort/preflight race hands the resume back via `release(false)`. A prompt
 		// arriving after the cleanup while an earlier parked prompt is still settling
 		// takes part in the same decision. No-op otherwise.
-		const release = await this.#maintenance.waitForManualCompactionCleanup();
+		const release = await this.#maintenance.waitForManualMaintenanceCleanup();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
 		if (!release) return this.#dispatchPrompt(text, options, submittedAt, outcome);
 		try {
@@ -12692,8 +12693,16 @@ export class AgentSession implements SettingsScope {
 	async dumpLlmRequestToTmpDir(): Promise<string | undefined> {
 		const messages = this.messages;
 		if (messages.length === 0) return undefined;
+		const json = await this.#formatLlmRequestJson(messages);
 		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
-		await Bun.write(filePath, await this.#formatLlmRequestJson(messages));
+		// Raw context may include secrets; create the sidecar owner-only.
+		const handle = await fs.promises.open(filePath, "wx", 0o600);
+		try {
+			await handle.writeFile(json);
+		} finally {
+			await handle.close();
+		}
+		void pruneStaleLlmRequestDumps(os.tmpdir());
 		return filePath;
 	}
 
@@ -12713,18 +12722,7 @@ export class AgentSession implements SettingsScope {
 			})),
 			messages: llmMessages,
 		};
-		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
-		// The payload is raw session context (file contents, anything the user
-		// pasted, including credentials): create it owner-only instead of relying
-		// on the process umask, which would leave it world-readable in $TMPDIR.
-		const handle = await fs.promises.open(filePath, "wx", 0o600);
-		try {
-			await handle.writeFile(`${JSON.stringify(payload, null, 2)}\n`);
-		} finally {
-			await handle.close();
-		}
-		void pruneStaleLlmRequestDumps(os.tmpdir());
-		return filePath;
+		return `${JSON.stringify(payload, null, 2)}\n`;
 	}
 
 	/**

@@ -778,12 +778,66 @@ async function pathChangedIn(
 	return result.exitCode === 0 && result.stdout.trim().length > 0;
 }
 
-async function runCommandInherit(cwd: string, command: readonly string[], phase: string): Promise<void> {
+async function runCommandInherit(
+	cwd: string,
+	command: readonly string[],
+	phase: string,
+	env: Record<string, string | undefined> = {},
+): Promise<void> {
 	console.log(`\n==> ${phase}`);
-	const proc = Bun.spawn(command, { cwd, env: { ...process.env }, stdout: "inherit", stderr: "inherit" });
+	const proc = Bun.spawn(command, { cwd, env: { ...process.env, ...env }, stdout: "inherit", stderr: "inherit" });
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) {
 		throw new Error(`${phase} failed (exit ${exitCode}): ${command.join(" ")}`);
+	}
+}
+
+interface ActionSteps {
+	readonly steps?: readonly { readonly uses?: string }[];
+}
+
+interface WorkflowDefinition {
+	readonly jobs?: Readonly<Record<string, ActionSteps>>;
+	readonly runs?: ActionSteps;
+}
+
+/** Check local action dependencies, including nested composite actions, before publishing a merge. */
+export async function verifyWorkflowActions(repoRoot: string, workflow: string): Promise<void> {
+	const visited = new Set<string>();
+	async function visit(relative: string): Promise<void> {
+		if (visited.has(relative)) return;
+		visited.add(relative);
+		const definition = Bun.YAML.parse(await Bun.file(path.join(repoRoot, relative)).text()) as WorkflowDefinition;
+		const groups = [...Object.values(definition.jobs ?? {}), definition.runs ?? {}];
+		for (const group of groups) {
+			for (const step of group.steps ?? []) {
+				if (!step.uses?.startsWith("./")) continue;
+				const directory = path.join(repoRoot, step.uses);
+				const yaml = ["action.yml", "action.yaml"];
+				let found = false;
+				for (const name of yaml) {
+					if (!(await Bun.file(path.join(directory, name)).exists())) continue;
+					await visit(path.join(step.uses, name));
+					found = true;
+					break;
+				}
+				if (!found && !(await Bun.file(path.join(directory, "Dockerfile")).exists())) {
+					throw new Error(
+						`${relative} references missing local action ${step.uses} (no action.yml, action.yaml or Dockerfile).`,
+					);
+				}
+			}
+		}
+	}
+	await visit(workflow);
+}
+
+async function requireCleanPublication(repoRoot: string, verbose: boolean): Promise<void> {
+	const dirty = (await gitChecked(repoRoot, ["status", "--porcelain"], { verbose })).trim();
+	if (dirty) {
+		throw new Error(
+			`Refusing to deploy and push a different tree from the one being verified. Commit the integration fixes or restored WIP first, then rerun ./update.sh --no-fetch --no-merge; use --no-push for a local WIP build.\n${dirty}`,
+		);
 	}
 }
 
@@ -797,12 +851,15 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 	);
 	if (depManifests.length > 0) {
 		console.log(`\n==> Dependency manifests changed (${depManifests.join(", ")}); installing`);
-		await runCommandInherit(repoRoot, ["bun", "install"], "bun install");
+		await runCommandInherit(repoRoot, ["bun", "install", "--frozen-lockfile"], "bun install --frozen-lockfile");
 	} else {
 		console.log("\n==> No dependency changes; skipping bun install");
 	}
 
+	await verifyWorkflowActions(repoRoot, ".github/workflows/fork-verify.yml");
 	await runCommandInherit(repoRoot, ["bun", "run", "check:ts"], "Type-check (bun run check:ts)");
+	// The tests load the addon too; rebuilding only at the binary stage tests stale native code.
+	await ensureHostNatives(repoRoot, verbose);
 
 	if (manifest.tests.length > 0) {
 		await runCommandInherit(repoRoot, ["bun", "test", ...manifest.tests], "Fork stability test suite");
@@ -816,7 +873,8 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 		verbose,
 	);
 	if (rustChanged) {
-		await runCommandInherit(repoRoot, ["bun", "run", "test:rs"], "Rust tests (bun run test:rs)");
+		// run-rs-task normally looks only at uncommitted changes, but this merge is already committed.
+		await runCommandInherit(repoRoot, ["bun", "run", "test:rs"], "Rust tests (bun run test:rs)", { CI: "true" });
 	}
 }
 
@@ -1035,6 +1093,7 @@ async function runDeploy(
 }
 
 async function runPush(repoRoot: string, pushRemote: string, branch: string, verbose: boolean): Promise<void> {
+	await requireCleanPublication(repoRoot, verbose);
 	const tracking = `refs/remotes/${pushRemote}/${branch}`;
 	const haveTracking = (await runGit(repoRoot, ["rev-parse", "--verify", "-q", tracking], { verbose })).exitCode === 0;
 	if (haveTracking) {
@@ -1051,11 +1110,10 @@ async function runPush(repoRoot: string, pushRemote: string, branch: string, ver
 			return;
 		}
 		if (ahead === 0 && behind > 0) {
-			console.log(
+			throw new Error(
 				`\n==> ${pushRemote}/${branch} has ${behind} commit(s) we do not have (remote advanced elsewhere). ` +
 					`Not pushing. Reconcile (git pull --rebase ${pushRemote} ${branch}) before retrying.`,
 			);
-			return;
 		}
 	}
 	console.log(`\n==> Pushing ${branch} to ${pushRemote}`);
@@ -1346,6 +1404,7 @@ async function main(): Promise<void> {
 		}
 	}
 
+	if (!flags.noPush) await requireCleanPublication(repoRoot, flags.verbose);
 	if (!flags.noCheck) {
 		// After a manual resolution (`--no-merge`) the merge already happened, so
 		// `base` is unset. Compare against the fork's pre-merge tip — the first
@@ -1374,7 +1433,14 @@ async function main(): Promise<void> {
 			checkBase =
 				parents[1] ?? (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
 		}
-		await runChecks(repoRoot, checkBase, manifest, flags.verbose);
+		try {
+			await runChecks(repoRoot, checkBase, manifest, flags.verbose);
+		} catch (error) {
+			console.error(
+				"\nVerification failed. The merge is retained locally; build, deployment and push have not run. Fix the reported errors, commit the fixes, then rerun ./update.sh --no-fetch --no-merge.",
+			);
+			throw error;
+		}
 		summary.push("checks passed (type-check + fork stability tests)");
 	}
 
@@ -1385,6 +1451,7 @@ async function main(): Promise<void> {
 	}
 
 	if (!flags.noDeploy && built !== null) {
+		if (!flags.noPush) await requireCleanPublication(repoRoot, flags.verbose);
 		const deployDir = planDeployTarget(flags, manifest);
 		const deployed = await runDeploy(repoRoot, built, deployDir, flags.backup, !flags.noSmoke);
 		summary.push(

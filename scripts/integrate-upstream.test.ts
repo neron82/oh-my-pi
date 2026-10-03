@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { nativeVersionSentinel } from "./integrate-upstream";
+import { nativeVersionSentinel, verifyWorkflowActions } from "./integrate-upstream";
 
 const SCRIPT_PATH = path.join(import.meta.dir, "integrate-upstream.ts");
 
@@ -271,6 +271,42 @@ describe("nativeVersionSentinel", () => {
 });
 
 describe("integrate-upstream", () => {
+	test("blocks publication of restored WIP while retaining the integration for repair", async () => {
+		const fixture = await makeFixture({ upstreamCommits: "regular", dirty: true });
+		const result = await runScript(fixture);
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("Commit the integration fixes or restored WIP first");
+		expect(await headSubject(fixture)).toMatch(/^Merge upstream main/);
+		expect(await fileText(fixture, "lib/shared.ts")).toContain("export const wip = true;");
+		const remote = Bun.spawn(["git", "rev-parse", "--verify", "refs/heads/prompt-cache-stability"], {
+			cwd: fixture.forkSim,
+			env: envFor(fixture.home),
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		expect(await remote.exited).not.toBe(0);
+	});
+
+	test("fails before publishing when a nested composite action was removed upstream", async () => {
+		const repo = await tmpdir("integrate-actions-");
+		await Bun.write(
+			path.join(repo, "workflow.yml"),
+			"jobs:\n  verify:\n    steps:\n      - uses: ./.github/actions/setup\n",
+		);
+		await Bun.write(
+			path.join(repo, ".github/actions/setup/action.yml"),
+			"runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/deleted\n",
+		);
+		await expect(verifyWorkflowActions(repo, "workflow.yml")).rejects.toThrow(
+			"references missing local action ./.github/actions/deleted",
+		);
+		await Bun.write(
+			path.join(repo, ".github/actions/deleted/action.yaml"),
+			"runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@v6\n",
+		);
+		await verifyWorkflowActions(repo, "workflow.yml");
+	});
+
 	test("merges upstream while keeping protected fork code, pushing the merge to the fork remote", async () => {
 		const fixture = await makeFixture({ upstreamCommits: "regular" });
 		const result = await runScript(fixture);
@@ -432,7 +468,7 @@ describe("integrate-upstream", () => {
 		const fixture = await makeFixture({ upstreamCommits: "regular", dirty: true });
 
 		// Default behavior: WIP is stashed for the merge and popped back.
-		const integrated = await runScript(fixture);
+		const integrated = await runScript(fixture, ["--no-push"]);
 		expect(integrated.exitCode).toBe(0);
 		expect(await headSubject(fixture)).toMatch(/^Merge upstream main/);
 		expect(await fileText(fixture, "lib/shared.ts")).toContain("export const wip = true;");
@@ -442,7 +478,7 @@ describe("integrate-upstream", () => {
 		const fixture = await makeFixture({ upstreamCommits: "regular" });
 		await fs.writeFile(path.join(fixture.work, "update.sh"), "bun scripts/integrate-upstream.ts\n");
 
-		const integrated = await runScript(fixture);
+		const integrated = await runScript(fixture, ["--no-push"]);
 
 		expect(integrated.exitCode).toBe(0);
 		expect(await headSubject(fixture)).toMatch(/^Merge upstream main/);

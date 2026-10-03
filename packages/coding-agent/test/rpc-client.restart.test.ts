@@ -16,6 +16,15 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("RpcClient lifecycle (issue #4079 B)", () => {
+	test("delivers deferred-resume lifecycle notifications instead of silently dropping them", async () => {
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env: { MOCK_RPC_DEFERRED_RESUME: "1" } });
+		const received: string[] = [];
+		client.onSessionEvent(event => received.push(event.type));
+		await client.start();
+		await client.getState();
+		expect(received).toEqual(["deferred_resume_scheduled", "deferred_resume_cancelled", "deferred_resume_completed"]);
+	});
+
 	test("auto-negotiates protocol v2 and reassembles an oversized response", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

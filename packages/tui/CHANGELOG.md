@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed the fork welcome screen after the upstream banner redesign while retaining the whale mark.
+
 - Fixed Alt+Up (restore queued steering), arrows and other escape-sequence keys on Windows acting as Esc (interrupting the turn) and typing `[1;3A` into the editor when the console host relays them one byte at a time ([#14216](https://github.com/can1357/oh-my-pi/pull/14216) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.5.1] - 2026-10-03
