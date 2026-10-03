@@ -8,8 +8,8 @@
  * `omp` binary, installs it into the deploy dir (default ~/.local/bin), and
  * pushes the result to the fork remote.
  *
- * Native addons: upstream bumps the pi-natives version sentinel
- * (`__piNativesV{major}_{minor}_{patch}`) on every release, which leaves the
+ * Native addons: upstream changes the pi-natives release identity
+ * (a post-link version stamp, or a legacy sentinel) on every release, which leaves the
  * previously built `packages/natives/native/*.node` files stale. The build
  * stage detects a stale host addon and rebuilds it via `bun run build:native`
  * automatically; the deploy stage clears ~/.omp/natives/<version> so the
@@ -57,6 +57,8 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { containsLegacyVersionSentinel, containsVersionStamp } from "../packages/natives/native/version-sentinel.js";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "./host-detect";
 
 const SCRIPT_DIR = import.meta.dir;
@@ -878,18 +880,6 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 	}
 }
 
-/**
- * Version sentinel the compiled native addon must expose. Contract shared
- * with `crates/pi-natives` (the `#[napi]` export) and the loader in
- * `packages/natives/native/index.js`: `__piNativesV{major}_{minor}_{patch}`,
- * non-alphanumerics mapped to `_`. A stale `.node` (from an earlier release)
- * fails the loader's check and breaks every native feature, so the build
- * stage verifies and rebuilds before embedding.
- */
-export function nativeVersionSentinel(version: string): string {
-	return `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
-}
-
 async function readNativesVersion(repoRoot: string): Promise<string> {
 	const pkg = (await readJson(path.join(repoRoot, NATIVES_PKG_REL))) as { version?: unknown } | null;
 	if (pkg === null || typeof pkg.version !== "string" || pkg.version.length === 0) {
@@ -907,18 +897,14 @@ function hostAddonFilename(): string {
 	}).filename;
 }
 
-/**
- * Whether the addon binary exposes the version sentinel. `grep -q` stops at
- * the first match inside the multi-hundred-MB binary; on hosts without grep
- * (win32) it reports false so the rebuild path triggers instead of trusting
- * a possibly stale file.
- */
-async function addonExposesSentinel(addonPath: string, sentinel: string): Promise<boolean> {
+/** Match release identity with the same post-link stamp and legacy rules as the loader and embedder. */
+export async function addonMatchesVersion(addonPath: string, version: string): Promise<boolean> {
 	try {
-		const proc = Bun.spawn(["grep", "-a", "-q", sentinel, addonPath], { stdout: "ignore", stderr: "ignore" });
-		return (await proc.exited) === 0;
-	} catch {
-		return false;
+		const bytes = await fs.readFile(addonPath);
+		return containsVersionStamp(bytes, version) || containsLegacyVersionSentinel(bytes, version);
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
 	}
 }
 
@@ -935,8 +921,8 @@ function embeddableAddonFilenames(): readonly string[] {
 }
 
 /**
- * Ensure the native addons under packages/natives/native are built from the
- * current tree. Upstream bumps the sentinel on every release
+ * Ensure the native addons under packages/natives/native identify the
+ * current release. Upstream updates the version stamp on every release
  * (`packages/natives/package.json#version`), so after an integration the
  * previously embedded `.node` files are stale and would fail the compiled
  * binary's smoke test. Rebuilds through the repo's own host path
@@ -945,22 +931,23 @@ function embeddableAddonFilenames(): readonly string[] {
 async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<void> {
 	const nativesDir = path.join(repoRoot, NATIVES_DIR_REL);
 	const version = await readNativesVersion(repoRoot);
-	const sentinel = nativeVersionSentinel(version);
 	const hostFilename = hostAddonFilename();
 	const hostPath = path.join(nativesDir, hostFilename);
 
-	if (await addonExposesSentinel(hostPath, sentinel)) {
-		console.log(`\n==> Native addon ${hostFilename} is current (${sentinel}); no rebuild needed`);
+	if (await addonMatchesVersion(hostPath, version)) {
+		console.log(`\n==> Native addon ${hostFilename} is current (${version}); no rebuild needed`);
 	} else {
-		console.log(`\n==> Host native addon missing or stale (expected ${sentinel} in ${hostFilename}); rebuilding`);
+		console.log(
+			`\n==> Host native addon missing or stale (expected release ${version} in ${hostFilename}); rebuilding`,
+		);
 		await runCommandInherit(repoRoot, ["bun", "run", "build:native"], "Rebuild host native addon (cargo/N-API)");
 
-		if (!(await addonExposesSentinel(hostPath, sentinel))) {
+		if (!(await addonMatchesVersion(hostPath, version))) {
 			throw new Error(
-				`Native rebuild finished but ${hostPath} still does not expose ${sentinel}. The rebuild failed or produced the wrong addon, so the compiled binary would fail its smoke test.`,
+				`Native rebuild finished but ${hostPath} still does not identify release ${version}. The rebuild failed or produced the wrong addon, so the compiled binary would fail its smoke test.`,
 			);
 		}
-		console.log(`==> Native addon rebuilt: ${hostFilename} (${sentinel})`);
+		console.log(`==> Native addon rebuilt: ${hostFilename} (${version})`);
 
 		const dirtyBindings = (
 			await runGit(
@@ -985,7 +972,7 @@ async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<vo
 	// `bun run build:native` builds this host's variant only, while
 	// packages/natives/scripts/embed-native.ts embeds *every* variant present
 	// in the directory and fails the build when one lacks the current
-	// sentinel. A sibling left over from an older release (a release build on
+	// release identity. A sibling left over from an older release (a release build on
 	// this machine produced both) would otherwise break every build until
 	// someone deleted it by hand.
 	for (const filename of embeddableAddonFilenames()) {
@@ -998,14 +985,14 @@ async function ensureHostNatives(repoRoot: string, verbose: boolean): Promise<vo
 			))
 		)
 			continue;
-		if (await addonExposesSentinel(sibling, sentinel)) continue;
+		if (await addonMatchesVersion(sibling, version)) continue;
 		const quarantined = sibling.endsWith(".node")
 			? `${sibling.slice(0, -".node".length)}.stale.node`
 			: `${sibling}.stale`;
 		await fs.rm(quarantined, { force: true });
 		await fs.rename(sibling, quarantined);
 		console.log(
-			`==> Quarantined stale ${filename} as ${path.basename(quarantined)} (it lacks ${sentinel}, so the embed step would reject it). ` +
+			`==> Quarantined stale ${filename} as ${path.basename(quarantined)} (it does not identify release ${version}, so the embed step would reject it). ` +
 				`This host's local build cannot produce that variant; regenerate it with \`bun scripts/bazel-natives.ts <target>\` when you need it.`,
 		);
 	}

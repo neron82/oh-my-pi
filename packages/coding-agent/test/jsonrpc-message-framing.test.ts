@@ -5,8 +5,8 @@
  * A server that lies about Content-Length or never terminates a frame must
  * not be able to grow the client's pending buffer without bound. Contract:
  * once pending bytes (or a declared body) exceed the cap, `overflowed` is
- * set, `push` becomes a no-op (memory stays bounded), `drain` yields nothing
- * further, and `remainder` is empty so the reader can tear down the
+ * set and `remainder` is empty. Framing violations throw a sticky error;
+ * raw pending-byte overflow stops buffering so the reader can tear down the
  * connection.
  */
 import { describe, expect, it } from "bun:test";
@@ -20,11 +20,11 @@ describe("MessageFramer pending-byte cap", () => {
 	it("overflows on a declared Content-Length beyond the cap", () => {
 		const framer = new MessageFramer(Buffer.alloc(0), 1024);
 		framer.push(Buffer.from("Content-Length: 1000000\r\n\r\n", "latin1"));
-		// The declared body can never complete within the budget: no yield.
-		expect([...framer.drain(() => {})]).toEqual([]);
+		// The reader gets the framing cause immediately and can tear down the peer.
+		expect(() => [...framer.drain(() => {})]).toThrow(/Content-Length.*limit/);
 		expect(framer.overflowed).toBe(true);
-		// push becomes a no-op: the buffer cannot keep growing.
-		framer.push(Buffer.alloc(4096));
+		// A failed parser rejects further input and cannot keep buffering.
+		expect(() => framer.push(Buffer.alloc(4096))).toThrow(/Content-Length/);
 		expect(framer.overflowed).toBe(true);
 		expect(framer.remainder().length).toBe(0);
 	});

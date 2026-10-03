@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { nativeVersionSentinel, verifyWorkflowActions } from "./integrate-upstream";
+import { addonMatchesVersion, verifyWorkflowActions } from "./integrate-upstream";
 
 const SCRIPT_PATH = path.join(import.meta.dir, "integrate-upstream.ts");
 
@@ -256,17 +256,20 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-describe("nativeVersionSentinel", () => {
-	test("derives the exact sentinel the crate export and the JS loader agree on", () => {
-		// Deploy-time contract: a stale .node from an earlier release fails the
-		// loader's sentinel check and breaks every native feature, so the
-		// build-stage staleness check must derive byte-identical names.
-		expect(nativeVersionSentinel("18.1.3")).toBe("__piNativesV18_1_3");
-		expect(nativeVersionSentinel("18.0.3")).toBe("__piNativesV18_0_3");
-	});
-
-	test("maps non-alphanumerics to underscores so prereleases are valid JS identifiers", () => {
-		expect(nativeVersionSentinel("18.1.3-canary.2")).toBe("__piNativesV18_1_3_canary_2");
+describe("native addon release identity", () => {
+	test("accepts post-link stamps and legacy addons while rejecting stale, missing and prefix-matching releases", async () => {
+		const dir = await tmpdir("integrate-addon-");
+		const file = path.join(dir, "addon.node");
+		expect(await addonMatchesVersion(file, "18.5.1")).toBe(false);
+		await Bun.write(file, "binary\0PI_NATIVES_VERSION_STAMP:18.5.1\0padding");
+		expect(await addonMatchesVersion(file, "18.5.1")).toBe(true);
+		expect(await addonMatchesVersion(file, "18.5.0")).toBe(false);
+		await Bun.write(file, "binary\0PI_NATIVES_VERSION_STAMP:18.5.10\0padding");
+		expect(await addonMatchesVersion(file, "18.5.1")).toBe(false);
+		await Bun.write(file, "binary\0__piNativesV18_5_1\0padding");
+		expect(await addonMatchesVersion(file, "18.5.1")).toBe(true);
+		await Bun.write(file, "binary\0__piNativesV18_5_10\0padding");
+		expect(await addonMatchesVersion(file, "18.5.1")).toBe(false);
 	});
 });
 

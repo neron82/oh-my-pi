@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Fork updates now accept the current native addon version stamps and preserve explicit oversized-frame errors from language servers and debuggers.
 - Fixed prompts starting before manual handoff completed and restored valid JSON in session dump archives after upstream integration.
 - RPC clients now receive deferred-resume lifecycle events, with matching TypeScript, Python, Rust, and Go wire definitions.
 - Fork updates now verify GitHub action dependencies, test current native addons and committed Rust changes, and stop publication until integration fixes are committed.

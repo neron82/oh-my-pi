@@ -67,26 +67,26 @@ integrate → check → build → deploy → push
    resolve
 ```
 
-### Native addons (version-sentinel hardening)
+### Native addon release identity
 
-Upstream bumps the pi-natives version sentinel (`__piNativesV{major}_{minor}
-_{patch}`, derived from `packages/natives/package.json#version`) on every
-release. A `.node` built from an older release fails the loader's sentinel
-check at binary startup — the exact failure this pipeline hit on the v18.1.3
-integration, where the smoke gate caught the stale embed right before deploy.
+The native loader and binary embedder share the release-identity helpers in
+`packages/natives/native/version-sentinel.js`. Current addons carry a post-link
+`PI_NATIVES_VERSION_STAMP:<version>` stamp; older releases exported
+`__piNativesV<version>`. The integration pipeline uses those same helpers to
+accept either format for the exact package version and reject stale addons.
 
 The pipeline now handles that automatically:
 
-- **Build stage** verifies that the host addon
+- **Check and build stages** verify that the host addon
   (`packages/natives/native/pi_natives.<platform>-<arch>[-modern|-baseline].node`,
-  resolved through `scripts/host-detect.ts`) exposes the expected sentinel;
+  resolved through `scripts/host-detect.ts`) carries the expected release identity;
   if it is missing or stale it rebuilds it via `bun run build:native` (the
   repo's local Cargo/N-API host build) and hard-fails if the rebuilt addon
-  still lacks the sentinel. If the rebuild regenerates tracked bindings
+  still identifies a different release. If the rebuild regenerates tracked bindings
   (`native/index.js` / `native/index.d.ts`) differently from the merged tree,
   it prints a reminder to commit them.
 - **Sibling variants**: `embed-native.ts` embeds *every* x64 addon present in
-  that directory and refuses the build when one lacks the current sentinel.
+  that directory and refuses the build when one identifies a different release.
   A `-baseline` addon left over from an older release (this host builds only
   its own variant) would therefore block every build after a version bump, so
   the build stage quarantines a stale sibling as `<name>.stale.node` (gitignored) and prints the

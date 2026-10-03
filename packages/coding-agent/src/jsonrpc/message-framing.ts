@@ -10,61 +10,20 @@
 // Reused for all full (non-streaming) decodes; each decode() resets state, so a
 // single instance is safe and avoids per-message TextDecoder allocation.
 const MESSAGE_DECODER = new TextDecoder("utf-8");
+const HEADER_TERMINATOR = [13, 10, 13, 10];
 
-/**
- * Default cap on buffered (unparsed) bytes. A single LSP/DAP message peaks in
- * the tens of MB (whole-file diagnostics, large source content); 64 MB keeps
- * the buffer finite against a server that lies about Content-Length or never
- * terminates a frame.
- */
+// Headers carry a length and optional content type; bodies can contain entire
+// source files, workspace diagnostics, or base64 debugger memory responses.
+const MAX_HEADER_BYTES = 16 * 1024;
+const MAX_CONTENT_BYTES = 256 * 1024 * 1024;
+/** Fork cap on total unparsed bytes, including a header or stdout noise. */
 const DEFAULT_MAX_PENDING_BYTES = 64 * 1024 * 1024;
 
-/**
- * Upstream v18.2.2 bound: a peer that never terminates a header block is a
- * protocol violation, not recoverable noise. Exceeding it raises
- * {@link MessageFramingError} so callers can close the link.
- */
-const MAX_HEADER_BYTES = 16 * 1024;
-
-/**
- * Protocol violation while framing a JSON-RPC stream.
- *
- * Raised when a peer violates the framing contract in a way that cannot be
- * resynced (an unterminated header block). Overflow of the pending/content
- * budget still reports through `MessageFramer.overflowed` as well — callers
- * check the flag, the throw, or both; either signal must tear the transport
- * down.
- */
 export class MessageFramingError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "MessageFramingError";
 	}
-}
-
-/**
- * Locate the `\r\n\r\n` header terminator across the pending chunk list.
- * Returns the absolute byte index of the first `\r`, or -1 when not present.
- * Equivalent to scanning the contiguous concatenation of the chunks.
- */
-function findHeaderEndInChunks(chunks: Buffer[]): number {
-	let global = 0;
-	let b0 = -1;
-	let b1 = -1;
-	let b2 = -1;
-	for (const chunk of chunks) {
-		for (let i = 0; i < chunk.length; i++) {
-			const b3 = chunk[i];
-			if (b0 === 13 && b1 === 10 && b2 === 13 && b3 === 10) {
-				return global - 3;
-			}
-			b0 = b1;
-			b1 = b2;
-			b2 = b3;
-			global++;
-		}
-	}
-	return -1;
 }
 
 /** Copy the byte range [from, to) out of the pending chunk list into one Buffer. */
@@ -86,21 +45,6 @@ function copyChunkRange(chunks: Buffer[], from: number, to: number): Buffer {
 	return out;
 }
 
-/** Drop the first `count` bytes from the pending chunk list in place. */
-function dropChunkFront(chunks: Buffer[], count: number): void {
-	let removed = 0;
-	while (chunks.length > 0) {
-		const head = chunks[0];
-		if (removed + head.length <= count) {
-			removed += head.length;
-			chunks.shift();
-		} else {
-			chunks[0] = head.subarray(count - removed);
-			break;
-		}
-	}
-}
-
 /**
  * Incremental Content-Length frame decoder for a JSON message byte stream.
  *
@@ -116,33 +60,28 @@ export class MessageFramer {
 	#pendingLen = 0;
 	readonly #maxPendingBytes: number;
 	#overflowed = false;
+	#scanChunk = 0;
+	#scanOffset = 0;
+	#scanned = 0;
+	#matched = 0;
+	#messageStart = 0;
+	#contentLength: number | undefined;
+	#failure: MessageFramingError | undefined;
 
 	/** Seed the buffer with any unparsed remainder left by a previous reader. */
 	constructor(seed: Buffer, maxPendingBytes = DEFAULT_MAX_PENDING_BYTES) {
 		this.#maxPendingBytes = maxPendingBytes;
-		if (seed.length === 0) return;
-		if (seed.length > maxPendingBytes) {
-			// A persisted remainder over the cap can never complete: start
-			// overflowed rather than inheriting an oversized buffer.
-			this.#overflowed = true;
-			return;
-		}
-		this.#pendingChunks.push(seed);
-		this.#pendingLen = seed.length;
+		this.push(seed);
 	}
 
-	/**
-	 * Set once pending bytes exceed the cap — either accumulated reads or a
-	 * declared `Content-Length` beyond it. `push` becomes a no-op so memory
-	 * stays bounded; callers must treat this as a protocol error and tear the
-	 * connection down.
-	 */
+	/** A pending-byte overflow or framing failure requires transport teardown. */
 	get overflowed(): boolean {
 		return this.#overflowed;
 	}
 
 	/** Append a freshly read chunk to the pending buffer. */
 	push(chunk: Buffer): void {
+		if (this.#failure) throw this.#failure;
 		if (this.#overflowed || chunk.length === 0) return;
 		this.#pendingChunks.push(chunk);
 		this.#pendingLen += chunk.length;
@@ -154,17 +93,6 @@ export class MessageFramer {
 	}
 
 	/**
-	 * Mark the framer overflowed and raise the violation to the caller. Both
-	 * signals are set so callers may poll `overflowed` or catch the error.
-	 */
-	#fail(message: string): never {
-		this.#overflowed = true;
-		this.#pendingChunks.length = 0;
-		this.#pendingLen = 0;
-		throw new MessageFramingError(message);
-	}
-
-	/**
 	 * Yield the JSON text of every complete message currently buffered. A header
 	 * block without a `Content-Length` is non-protocol noise (e.g. a server
 	 * printing to stdout); `onResync` is invoked with the offending header text
@@ -172,49 +100,84 @@ export class MessageFramer {
 	 * stalling on the same junk header forever.
 	 */
 	*drain(onResync: (headerText: string) => void): Generator<string> {
+		if (this.#failure) throw this.#failure;
+		if (this.#overflowed) return;
 		while (true) {
-			const headerEnd = findHeaderEndInChunks(this.#pendingChunks);
-			if (headerEnd === -1) {
-				// A peer that never terminates a header block cannot be resynced the
-				// way a bogus-but-terminated header can: raise it. Upstream's merged
-				// callers depend on this throw (the LSP mux closes the link, the DAP
-				// client disposes the adapter); the flag below stays for the callers
-				// that only poll `overflowed`.
-				if (this.#pendingLen >= MAX_HEADER_BYTES) {
-					this.#fail(`JSON-RPC header block exceeds ${MAX_HEADER_BYTES} bytes`);
+			if (this.#contentLength === undefined) {
+				const headerEnd = this.#findHeaderEnd();
+				if (headerEnd === -1) break;
+				const headerText = MESSAGE_DECODER.decode(copyChunkRange(this.#pendingChunks, 0, headerEnd));
+				const lengths = [...headerText.matchAll(/^Content-Length:[ \t]*([^\r\n]*)$/gim)];
+				if (lengths.length === 0) {
+					this.#dropFront(headerEnd + 4);
+					onResync(headerText);
+					continue;
 				}
-				break;
+				const rawLength = lengths[0][1].trim();
+				if (lengths.length !== 1 || !/^\d+$/.test(rawLength)) {
+					this.#fail("Invalid or duplicate JSON-RPC Content-Length");
+				}
+				const contentLength = Number(rawLength);
+				const contentLimit = Math.min(MAX_CONTENT_BYTES, this.#maxPendingBytes);
+				if (!Number.isSafeInteger(contentLength) || contentLength > contentLimit) {
+					this.#fail(`JSON-RPC Content-Length exceeds ${contentLimit}-byte limit (frame buffer overflow)`);
+				}
+				this.#contentLength = contentLength;
+				this.#messageStart = headerEnd + 4;
 			}
 
-			const headerText = MESSAGE_DECODER.decode(copyChunkRange(this.#pendingChunks, 0, headerEnd));
-			const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-			if (!contentLengthMatch) {
-				onResync(headerText);
-				dropChunkFront(this.#pendingChunks, headerEnd + 4);
-				this.#pendingLen -= headerEnd + 4;
-				continue;
-			}
-
-			const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-			const messageStart = headerEnd + 4; // Skip \r\n\r\n
-			if (contentLength > this.#maxPendingBytes) {
-				// A body this large can never complete within the pending budget.
-				this.#overflowed = true;
-				this.#pendingChunks.length = 0;
-				this.#pendingLen = 0;
-				return;
-			}
-			const messageEnd = messageStart + contentLength;
+			const messageEnd = this.#messageStart + this.#contentLength;
 			if (this.#pendingLen < messageEnd) break;
-
-			const messageText = MESSAGE_DECODER.decode(copyChunkRange(this.#pendingChunks, messageStart, messageEnd));
-			dropChunkFront(this.#pendingChunks, messageEnd);
-			this.#pendingLen -= messageEnd;
-			yield messageText;
+			const text = MESSAGE_DECODER.decode(copyChunkRange(this.#pendingChunks, this.#messageStart, messageEnd));
+			this.#dropFront(messageEnd);
+			yield text;
 		}
 	}
 
-	/** The unparsed remainder, to persist when the reader stops. */
+	#findHeaderEnd(): number {
+		while (this.#scanChunk < this.#pendingChunks.length) {
+			const chunk = this.#pendingChunks[this.#scanChunk];
+			while (this.#scanOffset < chunk.length) {
+				const byte = chunk[this.#scanOffset++];
+				this.#scanned++;
+				this.#matched = byte === HEADER_TERMINATOR[this.#matched] ? this.#matched + 1 : byte === 13 ? 1 : 0;
+				if (this.#matched === 4) return this.#scanned - 4;
+				if (this.#scanned >= MAX_HEADER_BYTES) {
+					this.#fail(`JSON-RPC header exceeds ${MAX_HEADER_BYTES}-byte limit`);
+				}
+			}
+			this.#scanChunk++;
+			this.#scanOffset = 0;
+		}
+		return -1;
+	}
+
+	#dropFront(count: number): void {
+		let consumed = 0;
+		let remaining = count;
+		while (consumed < this.#pendingChunks.length && this.#pendingChunks[consumed].length <= remaining) {
+			remaining -= this.#pendingChunks[consumed++].length;
+		}
+		this.#pendingChunks.splice(0, consumed);
+		if (remaining > 0) this.#pendingChunks[0] = this.#pendingChunks[0].subarray(remaining);
+		this.#pendingLen -= count;
+		this.#scanChunk = 0;
+		this.#scanOffset = 0;
+		this.#scanned = 0;
+		this.#matched = 0;
+		this.#messageStart = 0;
+		this.#contentLength = undefined;
+	}
+
+	#fail(message: string): never {
+		this.#overflowed = true;
+		this.#pendingChunks.length = 0;
+		this.#pendingLen = 0;
+		this.#failure = new MessageFramingError(message);
+		throw this.#failure;
+	}
+
+	/** Includes the current header so another reader can resume mid-body. */
 	remainder(): Buffer {
 		return this.#pendingChunks.length === 0
 			? Buffer.alloc(0)
