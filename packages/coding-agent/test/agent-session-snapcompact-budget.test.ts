@@ -19,9 +19,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import { effectiveReserveTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { effectiveReserveTokens, prepareCompaction, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import { base64ImageSize } from "@oh-my-pi/pi-agent-core/image-tokens";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgSnapcompactMaxFrames } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -30,6 +33,7 @@ import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-us
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgSnapcompactShape } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 describe("AgentSession snapcompact frame-budget sizing", () => {
@@ -112,6 +116,34 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		authStorage.close();
 	});
 
+	/** Appends a 4.8 MB three-frame archive: over the 3 MB default, inside half of Anthropic's 24 MB inline-image budget. */
+	function appendFrameArchive(): string {
+		const firstKeptEntryId = sessionManager.getBranch().at(-1)?.id;
+		if (!firstKeptEntryId) throw new Error("Expected branch entry with id");
+		const frame = (fill: string) => ({
+			data: fill.repeat(1_600_000),
+			mimeType: "image/png",
+			cols: 8,
+			rows: 8,
+			chars: 8,
+		});
+		return sessionManager.appendCompaction("Archived history.", "archive", firstKeptEntryId, 150_000, {
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [frame("a"), frame("b"), frame("c")],
+					totalChars: 24,
+					truncatedChars: 0,
+				},
+			},
+		});
+	}
+
+	function archiveImages(messages: readonly AgentMessage[]): number {
+		const summary = messages.find(message => message.role === "compactionSummary");
+		if (summary?.role !== "compactionSummary") throw new Error("Expected a compaction summary");
+		return summary.blocks?.filter(block => block.type === "image").length ?? 0;
+	}
+
 	it("passes a maxFrames whose full projection (frames + text edges + base) fits the budget", async () => {
 		// Tighten kept-recent into the realistic ~100k-token range. Without
 		// it, the helper has so much headroom that even a flawed (too-large)
@@ -161,7 +193,9 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const maxFrames = opts?.maxFrames;
 		expect(maxFrames).toBeDefined();
 		expect(maxFrames).toBeLessThan(snapcompact.MAX_FRAMES_DEFAULT);
-		expect(maxFrames).toBeLessThanOrEqual(snapcompact.maxFramesForDataBudget());
+		expect(maxFrames).toBeLessThanOrEqual(
+			snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(model), snapcompact.frameDataBytesBudget(model)),
+		);
 		expect(maxFrames).toBeGreaterThan(0);
 
 		// Verify the FULL projection — base (non-message + kept-recent) +
@@ -242,7 +276,11 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 	it("applies the frame byte cap when the model context window is unknown", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
-		session.agent.setModel({ ...model, contextWindow: 0 });
+		// A rerouted baseUrl has no catalog inline-image budget, so the default byte cap binds.
+		session.agent.setModel({
+			...buildModel({ ...toModelSpec(model), baseUrl: "https://anthropic-proxy.example" }),
+			contextWindow: 0,
+		});
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -260,7 +298,16 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		await session.compact(undefined, { mode: "snapcompact" });
 
-		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
+		// Sonnet 4.5 renders 1568px frames, which cost less of the byte budget
+		// than the 1932px high-res frames.
+		const shape = snapcompact.resolveShape(model);
+		expect(shape.frameSize).toBe(1568);
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET),
+		);
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBeGreaterThan(
+			Math.floor(snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE),
+		);
 	});
 
 	it("caps maxFrames at the provider image budget so unknown gateways do not archive frames the send path will drop", async () => {
@@ -414,6 +461,41 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		});
 	});
 
+	it("re-renders an archive over the frame payload budget at fewer frames instead of rejecting it", async () => {
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const frame = { data: "A".repeat(4_000_000), mimeType: "image/png", cols: 10, rows: 10, chars: 10 };
+		const archiveResult = (frames: number) => ({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: Array.from({ length: frames }, () => frame),
+					totalChars: 10,
+					truncatedChars: 0,
+				},
+			},
+		});
+		// 4 frames of 4 MB overshoot the 12 MB frame budget official Anthropic gets; the re-render fits.
+		const compactSpy = vi
+			.spyOn(snapcompact, "compact")
+			.mockResolvedValueOnce(archiveResult(4))
+			.mockResolvedValueOnce(archiveResult(3));
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(2);
+		// 4 frames × 12 MB budget / 16 MB rendered = 3 frames.
+		expect(compactSpy.mock.calls[1]?.[1]).toEqual({ ...compactSpy.mock.calls[0]?.[1], maxFrames: 3 });
+		const entry = sessionManager.getBranch().findLast(e => e.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected the re-rendered archive to be committed");
+		expect(snapcompact.getPreservedArchive(entry.preserveData)?.frames).toHaveLength(3);
+	});
+
 	it("keeps the frame archive out of the auto_compaction_end event after persisting it", async () => {
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -450,4 +532,50 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 			[snapcompact.PRESERVE_KEY]: archive,
 		});
 	});
+
+	it.each([
+		// Gemini 3 bills a fixed 1,120 per image at any size.
+		{ name: "Gemini", provider: "google", id: "gemini-3.1-pro-preview", frameSize: 2048, frameTokens: () => 1120 },
+		// GPT bills 32px patches × 1.2 over the frame's real height (the last frame hugs its rows).
+		{
+			name: "Codex",
+			provider: "openai-codex",
+			id: "gpt-6.1-sol",
+			frameSize: 1568,
+			frameTokens: (height: number) => Math.ceil(49 * Math.ceil(height / 32) * 1.2),
+		},
+	] as const)(
+		"persists the trigger's post-commit count as tokensAfter for a real $name archive",
+		async ({ provider, id, frameSize, frameTokens }) => {
+			const bundled = getBundledModel(provider, id);
+			if (!bundled) throw new Error(`Expected bundled ${provider}/${id}`);
+			const model = { ...bundled, contextWindow: 400_000, maxTokens: 32_000 };
+			expect(snapcompact.resolveShape(model).frameSize).toBe(frameSize);
+			session.agent.setModel(model);
+
+			await session.compact(undefined, { mode: "snapcompact" });
+
+			const entry = sessionManager.getBranch().findLast(e => e.type === "compaction");
+			if (entry?.type !== "compaction") throw new Error("Expected a committed compaction entry");
+			const frames = snapcompact.getPreservedArchive(entry.preserveData)?.frames ?? [];
+			expect(frames.length).toBeGreaterThan(1);
+			const summary = session.messages.find(m => m.role === "compactionSummary");
+			if (summary?.role !== "compactionSummary") throw new Error("Expected a compaction summary message");
+			const blocks = summary.blocks ?? [];
+			expect(blocks.filter(block => block.type === "image")).toHaveLength(frames.length);
+			const tokenizer = session.agent.tokenizer;
+			const textOnly = { ...summary, blocks: blocks.filter(block => block.type === "text") };
+			let expectedFrameTokens = 0;
+			for (const frame of frames) {
+				const size = base64ImageSize(frame.data);
+				if (size?.width !== frameSize) throw new Error(`Expected a ${frameSize}px-wide frame`);
+				expectedFrameTokens += frameTokens(size.height);
+			}
+			expect(tokenizer.countMessage(summary) - tokenizer.countMessage(textOnly)).toBe(expectedFrameTokens);
+			expect(entry.tokensAfter).toBe(
+				computeNonMessageTokens(session, tokenizer, session.settings.revision) +
+					tokenizer.countMessages(session.messages, { excludeEncryptedReasoning: true }),
+			);
+		},
+	);
 });

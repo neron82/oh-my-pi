@@ -35,7 +35,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
@@ -44,6 +44,10 @@ import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
+import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { CfgProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,
@@ -250,7 +254,7 @@ afterEach(async () => {
 	// session index), and models.db under tmp/agent; Windows cannot delete open files.
 	AgentStorage.close();
 	HistoryStorage.close();
-	resetSessionIndexForTests();
+	closeSessionIndex();
 	closeModelCache();
 	await fs.rm(tmp, { recursive: true, force: true });
 });
@@ -367,6 +371,36 @@ describe("interactive collaboration startup", () => {
 			await joinAsWriter(replacement);
 		},
 	);
+
+	it("mirrors a cfg:// approval prompt to a writer guest and applies the guest's answer", async () => {
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		await mode.init({ suppressWelcomeIntro: true });
+		const host = await mode.collabController.start({ access: "control" });
+		const asked = Promise.withResolvers<CollabFrame & { t: "ui-request" }>();
+		const guest = await joinAsWriter(host, frame => {
+			if (frame.t === "ui-request") asked.resolve(frame);
+		});
+
+		const settings = testSession.session.settings;
+		const session = { settings, hasUI: true, settingsApproval: true, taskDepth: 0 } as unknown as ToolSession;
+		const write = new CfgProtocolHandler().write(parseInternalUrl("cfg://advisor/enabled"), "true", { session });
+		const { request } = await asked.promise;
+		expect(request.title).toContain("advisor.enabled");
+		guest.send({ t: "ui-response", reqId: request.reqId, value: "Allow once" });
+
+		expect((await write).details?.cfg?.outcome).toBe("applied");
+		expect(cfgAdvisorEnabled.get(settings)).toBe(true);
+	});
 
 	it("restores the local session and saved hosting policy after dedicated CLI join activation fails", async () => {
 		const finished = new Error("finished observing failed join");
@@ -637,7 +671,7 @@ describe("interactive collaboration startup", () => {
 		const send = CollabSocket.prototype.send;
 		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
 			function (this: CollabSocket, frame, targetPeer) {
-				if (frame.t === "hello") transport = this;
+				if (typeof frame !== "string" && frame.t === "hello") transport = this;
 				return send.call(this, frame, targetPeer);
 			},
 		);
@@ -1695,6 +1729,9 @@ describe("CollabController", () => {
 				// Only the host's 15 s connect timeout can end the stalled attempt.
 				vi.advanceTimersByTime(15_000);
 				expect(await state.firstStatus.promise).toMatch(/auto-start failed: timed out connecting to relay/);
+				// Restore before the retry publishes: Bun's fake clock stalls the
+				// real registry server's listen callback.
+				vi.useRealTimers();
 				await settled(publishSpy, 1);
 				await controller.idle();
 

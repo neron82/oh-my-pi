@@ -1,19 +1,19 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
-import { cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgCompaction, cfgCompactionMethodOrder } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const CONTEXT_WINDOW = 100_000;
 const THRESHOLD = 50_000;
@@ -72,6 +72,7 @@ describe("async speculative compaction", () => {
 			obfuscateTextForProvider?: (text: string | undefined) => string | undefined;
 			obfuscatePreparationForProvider?: <T>(preparation: T) => T;
 			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
+			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			generateHandoffDocument?: (
 				focus: string,
 				options?: { autoTriggered?: boolean; signal?: AbortSignal },
@@ -129,8 +130,11 @@ describe("async speculative compaction", () => {
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			persistEvalStateContext: () => {},
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
+			buildLiveProviderContext:
+				options.buildLiveProviderContext ?? (async (): Promise<Context> => ({ messages: [] })),
 			obfuscateTextForProvider: options.obfuscateTextForProvider ?? ((text: string | undefined) => text),
 			obfuscatePreparationForProvider:
 				options.obfuscatePreparationForProvider ?? (<T>(preparation: T) => preparation),
@@ -959,5 +963,14 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
 			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
 		);
+	});
+});
+
+describe("resolveSpeculationMethod", () => {
+	it("speculates past snapcompact when the model's wire strips image input", () => {
+		const settings = cfgCompaction.get(Settings.isolated({ "compaction.methodOrder": ["snapcompact", "soft"] }));
+		// Same declared input; only the second drops images on the wire.
+		expect(resolveSpeculationMethod(getBundledModel("anthropic", "claude-sonnet-4-5"), settings)).toBeUndefined();
+		expect(resolveSpeculationMethod(getBundledModel("venice", "deepseek-v4-1-flash"), settings)).toBe("soft");
 	});
 });
