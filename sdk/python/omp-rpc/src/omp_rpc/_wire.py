@@ -1620,6 +1620,10 @@ AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent
 """Streaming update for one assistant message, discriminated by `type`."""
 
 
+UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
+"""Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
+
+
 RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | DeferredResumeScheduledEvent | DeferredResumeCancelledEvent | DeferredResumeCompletedEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
