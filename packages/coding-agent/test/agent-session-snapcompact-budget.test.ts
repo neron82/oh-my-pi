@@ -27,6 +27,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { cfgSnapcompactMaxFrames } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
@@ -333,6 +334,120 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
+	it.each([
+		["the official endpoint attaches every frame", "https://api.anthropic.com", 3],
+		["a rerouted baseUrl attaches the newest frames within the default", "https://anthropic-proxy.example", 1],
+	] as const)("rebuilds the archive at the active model's frame byte budget: %s", (_, baseUrl, frames) => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		session.agent.setModel(buildModel({ ...toModelSpec(model), baseUrl }));
+		appendFrameArchive();
+
+		expect(archiveImages(session.buildDisplaySessionContext().messages)).toBe(frames);
+	});
+
+	it.each([
+		["the official endpoint attaches every frame", "https://api.anthropic.com", 3],
+		["a rerouted baseUrl attaches the newest frames within the default", "https://anthropic-proxy.example", 1],
+	] as const)(
+		"tree navigation with a session_tree handler installs and returns the archive at the active model's frame byte budget: %s",
+		async (_, baseUrl, frames) => {
+			const model = session.model;
+			if (!model) throw new Error("Expected model");
+			await session.dispose();
+			sessionManager = SessionManager.inMemory();
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "before the archive" }],
+				timestamp: Date.now(),
+			});
+			const extensionRunner = {
+				hasHandlers: (eventType: string) => eventType === "session_tree",
+				emit: async () => undefined,
+			} as unknown as ExtensionRunner;
+			session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model: buildModel({ ...toModelSpec(model), baseUrl }),
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+				}),
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry,
+				extensionRunner,
+			});
+			const archiveId = appendFrameArchive();
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "after the archive" }],
+				timestamp: Date.now(),
+			});
+
+			const result = await session.navigateTree(archiveId);
+
+			expect(result.cancelled).toBe(false);
+			expect(archiveImages(session.messages)).toBe(frames);
+			expect(archiveImages(result.sessionContext?.messages ?? [])).toBe(frames);
+		},
+	);
+
+	it("sizes a forced 2576px shape on OpenAI by the price the tokenizer will charge each frame", async () => {
+		// `5x8-bw` forces 2576px frames; OpenAI bills them 81² × 1.2 = 7,874 each,
+		// above the 5,024 ceiling the cap otherwise divides by.
+		const bundled = getBundledModel("openai-codex", "gpt-6.1-sol");
+		if (!bundled) throw new Error("Expected bundled openai-codex/gpt-6.1-sol");
+		const model = { ...bundled, contextWindow: 400_000, maxTokens: 32_000 };
+		session.agent.setModel(model);
+		cfgSnapcompactShape.set(session.settings, "5x8-bw");
+		const shape = snapcompact.resolveShape(model, "5x8-bw");
+		expect(shape.frameTokenEstimate).toBe(Math.ceil(81 ** 2 * 1.2));
+
+		// ~45k tokens of kept-recent traffic leaves room under the trigger for several
+		// frames, so the token budget, not the byte or provider caps, decides the count.
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "the quick brown fox jumps over the lazy dog. ".repeat(4_000) }],
+			timestamp: Date.now(),
+		});
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const maxFrames = compactSpy.mock.calls[0]?.[1]?.maxFrames ?? 0;
+		expect(maxFrames).toBeGreaterThan(1);
+		expect(maxFrames).toBeLessThan(
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(model)),
+		);
+
+		const settings = { enabled: true as const, reserveTokens: 16384, keepRecentTokens: 4000 };
+		// The archive plans within 60% of the trigger.
+		const budget = 0.6 * resolveThresholdTokens(model.contextWindow, settings);
+		const preparation = prepareCompaction(branchEntries, settings);
+		if (!preparation) throw new Error("Expected non-empty preparation");
+		const tokenizer = session.agent.tokenizer;
+		const baseTokens =
+			computeNonMessageTokens(session, tokenizer, session.settings.revision) +
+			tokenizer.countMessages(preparation.recentMessages);
+		const edgeTokens = Math.ceil((2 * snapcompact.geometry(shape).capacity) / 4) + 2000;
+		expect(baseTokens + maxFrames * shape.frameTokenEstimate + edgeTokens).toBeLessThanOrEqual(budget);
 	});
 
 	it("clamps maxFrames to the configured snapcompact.maxFrames ceiling", async () => {

@@ -91,7 +91,7 @@ export class MessageFramer {
 	#failure: MessageFramingError | undefined;
 
 	/** Seed the buffer with any unparsed remainder left by a previous reader. */
-	constructor(seed: Buffer, maxPendingBytes = DEFAULT_MAX_PENDING_BYTES) {
+	constructor(seed: Uint8Array, maxPendingBytes = DEFAULT_MAX_PENDING_BYTES) {
 		this.#maxPendingBytes = maxPendingBytes;
 		this.push(seed);
 	}
@@ -101,12 +101,18 @@ export class MessageFramer {
 		return this.#overflowed;
 	}
 
-	/** Append a freshly read chunk to the pending buffer. */
-	push(chunk: Buffer): void {
+	/**
+	 * Append a freshly read chunk to the pending buffer. The bytes are retained
+	 * as a zero-copy view until consumed, so callers must not reuse or mutate
+	 * the chunk after pushing it.
+	 */
+	push(chunk: Uint8Array): void {
 		if (this.#failure) throw this.#failure;
-		if (this.#overflowed || chunk.length === 0) return;
-		this.#pendingChunks.push(chunk);
-		this.#pendingLen += chunk.length;
+		if (this.#overflowed || chunk.byteLength === 0) return;
+		this.#pendingChunks.push(
+			Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+		);
+		this.#pendingLen += chunk.byteLength;
 		if (this.#pendingLen > this.#maxPendingBytes) {
 			this.#overflowed = true;
 			this.#pendingChunks.length = 0;

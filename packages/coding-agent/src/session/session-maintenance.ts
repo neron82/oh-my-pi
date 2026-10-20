@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	type MessageCountOptions,
 	canonicalMessage,
 	canonicalSystemPrompt,
 	canonicalTools,
@@ -96,7 +97,13 @@ import {
 	resolveMethodSettings,
 	resolveSpeculationMethod,
 } from "./compaction-methods";
-import { assistantTurnDelivered, convertToLlm, stripImagesFromMessage } from "./messages";
+import {
+	assistantTurnDelivered,
+	convertToLlm,
+	invalidateConvertToLlmArrayCache,
+	isUserAuthoredMessage,
+	stripImagesFromMessage,
+} from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -2796,6 +2803,7 @@ export class SessionMaintenance {
 			payloadRejection && hasExplicitMediaRejectionEvidence(assistantMessage.errorMessage);
 		const excludeMediaForPayloadRejection = payloadRejection && (!usageBackedOverflow || explicitMediaRejection);
 		const payloadCompactionSettings = cfgCompaction.get(this.#host.settings);
+		const payloadModel = this.#model;
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
@@ -2805,6 +2813,36 @@ export class SessionMaintenance {
 					payloadCompactionSettings,
 					excludeMediaForPayloadRejection,
 				));
+		// A cut point inside the failing turn is not older reclaimable history.
+		// Require a delivered assistant turn in the part being summarized;
+		// shake selects its own victims and has a no-progress guard.
+		const payloadBranch = trustedPayloadRejection ? this.#host.sessionManager.getBranch() : undefined;
+		const reclaimablePayloadHistory =
+			trustedPayloadRejection &&
+			compactionAvailable &&
+			!explicitMediaRejection &&
+			payloadModel !== undefined &&
+			payloadBranch?.some(
+				entry =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason !== "error",
+			) === true &&
+			(this.#usesExperimentalContextManagement() ||
+				resolveCompactionMethodOrder(payloadCompactionSettings.methodOrder).some(candidate => {
+					if (!isCompactionMethodUsable(candidate, "overflow", payloadModel, payloadCompactionSettings, true))
+						return false;
+					if (candidate === "shake") return true;
+					const preparation = prepareCompaction(
+						payloadBranch,
+						resolveMethodSettings(payloadCompactionSettings, candidate),
+						payloadModel,
+						this.#tokenizer,
+					);
+					return (
+						preparation?.messagesToSummarize.some(
+							message => message.role === "assistant" && message.stopReason !== "error",
+						) === true
+					);
+				}));
 		const unknownWindowDeadEnd =
 			payloadRejection && contextWindow <= 0 && !ambiguousPayloadRejection && !compactionAvailable;
 		if (unknownWindowDeadEnd || trustedPayloadRejection || (explicitMediaRejection && !usageBackedOverflow)) {
@@ -3514,8 +3552,8 @@ export class SessionMaintenance {
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(this.#model)),
+				snapcompact.providerFrameBudget(this.#model),
 				this.#configuredSnapcompactMaxFrames(),
 			);
 		}
@@ -3581,8 +3619,8 @@ export class SessionMaintenance {
 		return Math.min(
 			Math.floor(frameBudget / frameCost),
 			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(this.#model)),
+			snapcompact.providerFrameBudget(this.#model),
 			this.#configuredSnapcompactMaxFrames(),
 		);
 	}
@@ -3705,7 +3743,11 @@ export class SessionMaintenance {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+		options?: MessageCountOptions,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model) })
@@ -3722,7 +3764,7 @@ export class SessionMaintenance {
 		let tokens =
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
 			this.#tokenizer.countMessage(summaryMessage);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, options);
 		return tokens;
 	}
 
@@ -3809,6 +3851,31 @@ export class SessionMaintenance {
 		}
 		return (
 			this.#tokenizer.countMessages(archives, options) + this.#tokenizer.countMessages(convertToLlm(rest), options)
+		);
+	}
+
+	#compactionDeadEndWarning(remedies: string): string {
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		if (contextWindow > 0) {
+			const recoveryBand = Math.floor(
+				resolveThresholdTokens(contextWindow, this.#compactionSettings) * COMPACTION_RECOVERY_BAND,
+			);
+			const overhead = computeNonMessageTokens(
+				this.#host.nonMessageTokenSource(),
+				this.#tokenizer,
+				this.#host.settings.revision,
+			);
+			if (overhead > recoveryBand) {
+				return (
+					"Compaction cannot create headroom — pausing automatic maintenance. " +
+					"The system prompt and always-sent tool schemas alone exceed the recovery band; " +
+					"reduce fixed context or adjust compaction.modelThresholds."
+				);
+			}
+		}
+		return (
+			"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
+			`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`
 		);
 	}
 
@@ -4041,8 +4108,8 @@ export class SessionMaintenance {
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(this.#model)),
+				snapcompact.providerFrameBudget(this.#model),
 				this.#configuredSnapcompactMaxFrames(),
 			);
 		}
@@ -4066,8 +4133,8 @@ export class SessionMaintenance {
 		return Math.min(
 			Math.floor(frameBudget / frameCost),
 			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(this.#model)),
+			snapcompact.providerFrameBudget(this.#model),
 			this.#configuredSnapcompactMaxFrames(),
 		);
 	}
@@ -4950,6 +5017,17 @@ export class SessionMaintenance {
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+							// Reduction check in the encrypted-reasoning-excluded domain so opaque
+							// replay signatures cannot inflate the removable baseline (#10716);
+							// `triggerContextTokens` is already an encrypted-excluded stored
+							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
+							const projectedForReduction = this.#projectSnapcompactContextTokens(
+								preparation,
+								snapcompactResult,
+								{
+									excludeEncryptedReasoning: true,
+								},
+							);
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
 									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
@@ -4959,10 +5037,10 @@ export class SessionMaintenance {
 									? reductionBaseline
 									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
 										this.#projectPreSnapcompactContextTokens(preparation);
-							if (projected >= preparedReductionBaseline) {
+							if (projectedForReduction >= preparedReductionBaseline) {
 								logger.warn("Snapcompact projection would not reduce context", {
 									model: this.#model?.id,
-									projected,
+									projected: projectedForReduction,
 									reductionBaseline: preparedReductionBaseline,
 								});
 								snapcompactBlocker =

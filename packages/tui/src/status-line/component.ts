@@ -46,6 +46,7 @@ import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
 import { formatUsageStatLine } from "./usage-line";
+import { formatJobWidgetGlance, type JobWidgetEntry, latestJobWidget } from "../tools/job-widget";
 import type {
 	CollabStatus,
 	ComposerFacts,
@@ -3021,9 +3022,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// Second row under the bar: live tok/s, provider-reported cache-hit
 		// rate, and cumulative session input/output — all measured usage.
 		this.#usageStatLine = formatUsageStatLine(ctx.usageStats);
-		const separatorDef = plain
-			? { left: "·", right: "·" }
-			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const separators = this.#separatorMetrics(plain, effectiveSettings.separator ?? "powerline-thin");
+		const separatorDef = separators.def;
 
 		// `transparent` reuses the empty-string sentinel (`\x1b[49m`) so the bar
 		// inherits the terminal's default background, matching custom themes that

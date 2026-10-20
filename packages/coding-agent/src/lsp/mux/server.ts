@@ -242,9 +242,13 @@ export class LspMuxServer {
 			}
 			if (session.framer.overflowed) {
 				logger.warn("LSP mux session frame buffer overflow; closing session");
-				socket.destroy();
+				connection.destroy();
 				return;
 			}
+		};
+		connection.startRaw(onChunk, reason => {
+			if (reason) logger.warn("LSP mux session connection error", { error: reason });
+			void this.#closeSession(session);
 		});
 	}
 

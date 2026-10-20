@@ -5,7 +5,6 @@
  * showing args and output in JSON tree format similar to task tool.
  */
 import { type Component, Markdown } from "../index";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";

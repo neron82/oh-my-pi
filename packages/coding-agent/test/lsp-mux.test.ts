@@ -439,11 +439,23 @@ describe("LspMuxServer", () => {
 			first.client.notify("textDocument/didOpen", {
 				textDocument: { uri, languageId: "typescript", version: 1, text: "orphan" },
 			});
-			await second.client.request("test/echo", { barrier: true });
-			expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
-		},
-		10_000,
-	);
+		}
+		await first.client.request("test/echo", { barrier: true });
+		const firstClosed = first.client.waitForClose();
+		first.client.destroy();
+		await firstClosed;
+
+		const second = await link();
+		expect(second.connected.spawned).toBe(false);
+		const uri = uris.at(-1);
+		expect(uri).toBeDefined();
+		await initialize(second.client);
+		second.client.notify("textDocument/didOpen", {
+			textDocument: { uri, languageId: "typescript", version: 1, text: "replacement" },
+		});
+		await second.client.request("test/echo", { barrier: true });
+		expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
+	}, 10_000);
 
 	const overflowFixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server-overflow.ts");
 
@@ -451,7 +463,7 @@ describe("LspMuxServer", () => {
 		"kills a server whose frame buffer overflows",
 		async () => {
 			const pidFile = path.join(tmpDir, "overflow.pid");
-			const client = await MuxTestClient.connect(socketPath);
+			const client = await MuxTestClient.connect(endpoint);
 			clients.push(client);
 			const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, {
 				...connectParams,
