@@ -71,6 +71,8 @@ function canonicalTools(tools: Context["tools"]): string {
 			d: t.description ?? "",
 			p: t.parameters,
 			s: t.strict ?? null,
+			df: t.deferLoading ?? null,
+			native: t.native ?? null,
 			cf: t.customFormat ?? null,
 			cw: t.customWireName ?? null,
 		})),
@@ -86,6 +88,7 @@ function canonicalMessage(message: unknown): string {
 		r: m.role ?? null,
 		c: m.content ?? null,
 		pp: m.providerPayload ?? null,
+		rc: m.requestControls ?? null,
 		tc: m.toolCalls ?? m.tool_calls ?? null,
 		tcid: m.toolCallId ?? m.tool_call_id ?? null,
 		tn: m.toolName ?? m.name ?? null,
@@ -97,6 +100,7 @@ function canonicalMessage(message: unknown): string {
 interface SerializedRequest {
 	system: string;
 	tools: string;
+	inactiveTools: string;
 	messages: string[];
 	systemBytes: number;
 	toolsBytes: number;
@@ -108,14 +112,16 @@ interface SerializedRequest {
 function serializeContext(context: Context): SerializedRequest {
 	const system = canonicalSystemPrompt(context.systemPrompt);
 	const tools = canonicalTools(context.tools);
+	const inactiveTools = canonicalTools(context.inactiveTools);
 	const messages = (context.messages ?? []).map(canonicalMessage);
 	const systemBytes = byteLength(system);
-	const toolsBytes = byteLength(tools);
+	const toolsBytes = byteLength(tools) + byteLength(inactiveTools);
 	let messagesBytes = 0;
 	for (const m of messages) messagesBytes += byteLength(m);
 	return {
 		system,
 		tools,
+		inactiveTools,
 		messages,
 		systemBytes,
 		toolsBytes,
@@ -131,6 +137,7 @@ type Divergence =
 	| "identical"
 	| "system"
 	| "tools"
+	| "inactiveTools"
 	| `message[${number}]`
 	| `shrank[${number}]`;
 
@@ -152,7 +159,12 @@ function compareRequests(prev: SerializedRequest | null, cur: SerializedRequest)
 		cause.push("tool-set-changed");
 		return { stablePrefixBytes: stable, divergence: "tools" as Divergence, cause };
 	}
-	stable += cur.toolsBytes;
+	stable += byteLength(cur.tools);
+	if (prev.inactiveTools !== cur.inactiveTools) {
+		cause.push("inactive-tool-state-changed");
+		return { stablePrefixBytes: stable, divergence: "inactiveTools" as Divergence, cause };
+	}
+	stable += byteLength(cur.inactiveTools);
 	const bound = Math.min(cur.messages.length, prev.messages.length);
 	for (let i = 0; i < bound; i++) {
 		if (cur.messages[i] !== prev.messages[i]) {
@@ -553,6 +565,9 @@ async function main(): Promise<void> {
 		console.log(JSON.stringify({ legacy, fresh }, null, 2));
 	} else {
 		printReport(legacy, fresh);
+	}
+	if ([legacy, fresh].some(result => result.summary.monitorCrossCheck !== "matched")) {
+		throw new Error("Prompt-cache benchmark disagrees with the stability monitor");
 	}
 }
 

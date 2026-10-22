@@ -457,6 +457,78 @@ describe("AgentSession prompt admission racing abort", () => {
 		expect(calls).toBe(2);
 	});
 
+	it("parks a steer while the owning prompt invalidates its deferred resume", async () => {
+		const { session } = await createSession([() => ({ content: ["done"] })], false, {
+			clientBridge: { capabilities: {}, deferAgentInitiatedTurns: true },
+		});
+		const invalidationStarted = Promise.withResolvers<void>();
+		const releaseInvalidation = Promise.withResolvers<void>();
+		const incrementGeneration = session.sessionManager.incrementSessionGeneration.bind(session.sessionManager);
+		const invalidation = spyOn(session.sessionManager, "incrementSessionGeneration").mockImplementation(async () => {
+			invalidationStarted.resolve();
+			await releaseInvalidation.promise;
+			await incrementGeneration();
+		});
+		restores.push(() => invalidation.mockRestore());
+
+		const prompt = session.prompt("start a client turn");
+		await invalidationStarted.promise;
+		const steer = session.joinActiveTurn("steer during deferred resume invalidation");
+		releaseInvalidation.resolve();
+
+		expect(await withTimeout(steer, 2_000, "Steer never joined the client turn")).toBe(true);
+		expect(await prompt).toBe(true);
+		await session.waitForIdle();
+		expect(
+			session.agent.state.messages.some(
+				message =>
+					message.role === "user" &&
+					JSON.stringify(message.content).includes("steer during deferred resume invalidation"),
+			),
+		).toBe(true);
+	});
+
+	it("releases ownership and refuses parked steers when deferred resume invalidation fails", async () => {
+		let calls = 0;
+		const { session } = await createSession(
+			[
+				() => {
+					calls++;
+					return { content: ["should not stream"] };
+				},
+			],
+			false,
+			{ clientBridge: { capabilities: {}, deferAgentInitiatedTurns: true } },
+		);
+		const invalidationStarted = Promise.withResolvers<void>();
+		const releaseInvalidation = Promise.withResolvers<void>();
+		const invalidation = spyOn(session.sessionManager, "cancelDeferredResume").mockImplementation(async () => {
+			invalidationStarted.resolve();
+			await releaseInvalidation.promise;
+			throw new Error("Deferred resume cancellation failed");
+		});
+		restores.push(() => invalidation.mockRestore());
+
+		const prompt = session.prompt("cannot invalidate deferred resume");
+		void prompt.catch(() => undefined);
+		await invalidationStarted.promise;
+		let steerSettled = false;
+		const steer = session.joinActiveTurn("steer the failing prompt").then(admitted => {
+			steerSettled = true;
+			return admitted;
+		});
+		await Promise.resolve();
+		expect(steerSettled).toBe(false);
+		releaseInvalidation.resolve();
+
+		await expect(prompt).rejects.toThrow("Deferred resume cancellation failed");
+		expect(await withTimeout(steer, 2_000, "Failed prompt stranded its steer")).toBe(false);
+		expect(await session.joinActiveTurn("after the failed prompt")).toBe(false);
+		await session.waitForIdle();
+		expect(calls).toBe(0);
+		expect(session.getQueuedMessages().steering).toEqual([]);
+	});
+
 	it("refuses a steer whose owning prompt fails in setup, under an ACP client", async () => {
 		let calls = 0;
 		let apiKeyCalls = 0;

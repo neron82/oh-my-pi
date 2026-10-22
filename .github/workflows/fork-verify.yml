@@ -105,5 +105,8 @@ jobs:
         run: |
           bun -e 'const { tests } = await Bun.file("scripts/integrate/fork-paths.json").json(); const child = Bun.spawn(["bun", "test", ...tests], { stdout: "inherit", stderr: "inherit" }); process.exit(await child.exited);'
 
+      - name: Prompt-cache trajectory smoke
+        run: bun packages/coding-agent/scripts/prompt-cache-benchmark.ts
+
       - name: Type-check workspace
         run: bun run check:ts

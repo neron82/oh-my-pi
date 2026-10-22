@@ -196,6 +196,11 @@ add a test, summarize) → 6 model calls with 3 real tool executions (`read`,
 2× `write`) against a throwaway fixture repo; 11 real tools in the registry;
 no network, scripted mock model.
 
+The benchmark includes deferred/native tool metadata, inactive tool definitions,
+and message request controls in its byte accounting. It exits nonzero if that
+independent accounting disagrees with the runtime stability monitor; both the
+local integration pipeline and the fork's GitHub verification run this smoke.
+
 Measured (identical fixture layout, model, and settings except the
 configuration under test; each run gets its own fresh temp working
 directory, so the cwd value — which rides in the first user message —

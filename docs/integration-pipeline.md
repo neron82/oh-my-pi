@@ -45,7 +45,7 @@ The script runs the following stages, in order; each can be skipped:
    remembered and auto-resolved on the next integration.
 4. **Check** — re-installs dependencies with `bun install --frozen-lockfile` when the merge changed any
    `package.json`/`bun.lock`, validates the fork workflow’s local action dependencies, runs the full type-check (`bun run check:ts`), refreshes the host native addon before tests,
-   the fork's stability test suite, and `bun run test:rs` when the merge
+   the fork's stability test suite (including task-cache affinity and prompt-admission regressions), the independent prompt-cache trajectory smoke, and `bun run test:rs` when the merge
    touched `crates/`. Rust checks run with `CI=true` so committed merge changes are tested even when the working tree is clean. This is the safety net that catches upstream API churn
    breaking fork code that the merge kept.
 5. **Build** — verifies the host native addon is fresh, then compiles the

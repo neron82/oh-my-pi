@@ -866,6 +866,11 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 	if (manifest.tests.length > 0) {
 		await runCommandInherit(repoRoot, ["bun", "test", ...manifest.tests], "Fork stability test suite");
 	}
+	await runCommandInherit(
+		repoRoot,
+		["bun", "packages/coding-agent/scripts/prompt-cache-benchmark.ts"],
+		"Prompt-cache trajectory smoke",
+	);
 
 	const rustChanged = await pathChangedIn(
 		repoRoot,

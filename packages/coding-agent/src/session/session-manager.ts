@@ -57,6 +57,7 @@ import {
 	type CustomEntry,
 	type CustomMessageEntry,
 	type DeferredResumeEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -2014,6 +2015,7 @@ export class SessionManager {
 			cwd: this.#cwd,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
+			taskPromptCacheKey: options?.taskPromptCacheKey,
 			generation: 0,
 		};
 		const workspace = normalizeSessionWorkspace({
