@@ -20,12 +20,12 @@ export class SentToolDefinitions {
 	 * provider drops them from the declaration.
 	 */
 	withInactiveTools(context: Context): Context {
-		const inactiveTools = context.tools?.length ? this.#inactiveFor(context.messages, context.tools) : undefined;
+		const inactiveTools = context.tools?.length ? this.inactiveFor(context.messages, context.tools) : undefined;
 		if (!inactiveTools && !context.inactiveTools) return context;
 		return { ...context, inactiveTools };
 	}
 
-	#inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
+	inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
 		let declared: readonly string[] | undefined;
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];

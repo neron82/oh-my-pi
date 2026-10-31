@@ -1995,6 +1995,9 @@ async function finalizeProviderContext(
 	ownedDialect: Dialect | undefined,
 ): Promise<{ context: Context; promptToolWireTools: Context["tools"] }> {
 	let context = llmContext;
+	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
+	// re-declares; recomputed below against what the transform returns.
+	if (build.sentToolDefinitions) context = build.sentToolDefinitions.withInactiveTools(context);
 	if (build.transformProviderContext) {
 		context = await build.transformProviderContext(context, model);
 	}

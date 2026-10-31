@@ -40,6 +40,7 @@ import {
 	unpairedToolCallTail,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import { agentPauseGate } from "./pause";
 import { PromptStabilityMonitor } from "./prompt-stability";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";

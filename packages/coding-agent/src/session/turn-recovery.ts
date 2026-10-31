@@ -3070,32 +3070,8 @@ export class TurnRecovery {
 			return false;
 		}
 
-		// Fail-fast cap: if the provider asks us to wait longer than
-		// retry.maxDelayMs and we have no fallback credential or model to
-		// switch to, surface the error instead of sleeping. Defends against
-		// 3-hour Anthropic rate-limit windows that would otherwise leave a
-		// subagent (or interactive session) silently hung. The original
-		// assistant error message is preserved in agent state so the caller
-		// can act on it.
-		// Opt-out: retry.waitForUsageReset lets a provider-stated usage-limit
-		// reset (Flag.UsageLimit — 5h/weekly quota windows, CN 使用上限, spend
-		// caps, … on any provider) sleep past the cap. Gated on authoritative
-		// provider timing: either a parsed reset hint from the error text, or
-		// a complete usage-report window (every exhausted limit carries a
-		// future reset). Usage-limit errors with neither fall back to the
-		// 30-minute QUOTA_EXHAUSTED heuristic, and sleeping on that for a
-		// permanent error (402 balance, dead spend cap) would hold the session
-		// through repeated heuristic sleeps instead of surfacing it. Bounded
-		// by the stated wait so an unrelated large backoff cannot sneak
-		// through.
-		const maxDelayMs = retrySettings.maxDelayMs;
-		const waitForUsageReset =
-			retrySettings.waitForUsageReset === true &&
-			recordedUsageLimitOutcome !== undefined &&
-			(parsedRetryAfterMs !== undefined || recordedUsageLimitOutcome.reportResetAtMs !== undefined) &&
-			effectiveUsageLimitWaitMs !== undefined &&
-			delayMs <= effectiveUsageLimitWaitMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
+		// The fail-fast cap (`exceedsDelayCap`, defined above the chain consult).
+		if (exceedsDelayCap(delayMs) && !switchedCredential && !switchedModel) {
 			// Check if this is a usage-limit error with provider-stated timing that qualifies
 			// for durable deferred resume instead of failing.
 			const isUsageLimit = AIError.is(id, AIError.Flag.UsageLimit);

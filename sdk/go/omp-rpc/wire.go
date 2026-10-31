@@ -4607,6 +4607,8 @@ func (ToolStreamUpdateEvent) isRpcAgentEvent()        {}
 func (ToolExecutionEndEvent) isRpcAgentEvent()        {}
 func (AutoCompactionStartEvent) isRpcAgentEvent()     {}
 func (AutoCompactionEndEvent) isRpcAgentEvent()       {}
+func (ManualCompactionStartEvent) isRpcAgentEvent()   {}
+func (ManualCompactionEndEvent) isRpcAgentEvent()     {}
 func (AutoRetryStartEvent) isRpcAgentEvent()          {}
 func (AutoRetryEndEvent) isRpcAgentEvent()            {}
 func (DeferredResumeScheduledEvent) isRpcAgentEvent() {}

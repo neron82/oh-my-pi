@@ -8269,7 +8269,7 @@ export class AgentSession implements SettingsScope {
 			// Neither may overlap an ordinary turn. A prompt parked by `/compact`
 			// supersedes its interrupted-turn resume only if it claims the session;
 			// locally handled commands and failed dispatches release that claim.
-			const release = await this.#maintenance.waitForManualMaintenanceCleanup();
+			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
 			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome);
 			try {

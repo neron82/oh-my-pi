@@ -94,6 +94,10 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (Bun.env.MOCK_RPC_EXIT_AFTER_PROMPT_ACK === "1" && frame.type === "prompt") {
+				writeFrame({ id, type: "response", command: "prompt", success: true, data: { agentInvoked: true } });
+				process.exit(0);
+			}
 			if (Bun.env.MOCK_RPC_DEFERRED_RESUME === "1" && frame.type === "get_state") {
 				writeFrame({
 					type: "deferred_resume_scheduled",
