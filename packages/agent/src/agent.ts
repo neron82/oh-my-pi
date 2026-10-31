@@ -23,7 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
-import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -60,6 +60,7 @@ import type {
 	AgentTool,
 	AgentToolContext,
 	AgentTurnEndContext,
+	AsideBoundary,
 	AsideMessage,
 	PrepareQueuedMessages,
 	QueuedMessageQueue,
@@ -69,7 +70,6 @@ import type {
 	ToolChoiceDirective,
 } from "./types";
 import { isSoftToolRequirement } from "./types";
-import { EventLoopKeepalive } from "./utils/yield";
 
 /**
  * Default convertToLlm: Keep only LLM-compatible replay messages.
@@ -475,6 +475,12 @@ export class Agent {
 	#cwdResolver?: () => string | undefined;
 
 	#runningPrompt?: Promise<void>;
+	#isPaused = false;
+
+	/** True while this unfinished turn is safely parked by the process pause gate. */
+	get isPaused(): boolean {
+		return this.#isPaused && agentPauseGate.paused && !this.#abortController?.signal.aborted;
+	}
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
@@ -501,7 +507,7 @@ export class Agent {
 	#onModelCallSystemPrompt?: (systemPrompt: string[]) => void;
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
-	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
+	#asideMessageProvider?: (boundary: AsideBoundary) => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
 	/** Per-agent prompt-stability monitor (always on; pure observation). */
@@ -638,6 +644,12 @@ export class Agent {
 	set promptCacheKey(value: string | undefined) {
 		this.#promptCacheKey = value;
 	}
+
+	/**
+	 * Fields added to every log record written while this agent runs (the
+	 * owning session's `sessionId`), so in-process agents' records stay apart.
+	 */
+	logContext: Readonly<Record<string, unknown>> | undefined;
 
 	/**
 	 * Static metadata forwarded to every API request when no resolver is installed
@@ -815,6 +827,23 @@ export class Agent {
 		this.#pruneToolDescriptions = value;
 	}
 
+	/**
+	 * Whether requests to `model` actually ship description-stripped tool specs.
+	 * Owned dialects render full definitions in-band, so they never prune; the
+	 * loop applies the same rule (`pruneToolDescriptions && !ownedDialect`).
+	 * Context accounting reads this instead of the raw setting.
+	 */
+	prunesToolDescriptions(model: Model | undefined): boolean {
+		return this.#pruneToolDescriptions && model !== undefined && !this.#ownedDialect(model);
+	}
+
+	#ownedDialect(model: Model): Dialect | undefined {
+		return (
+			(this.#dialectResolver ? this.#dialectResolver(model) : this.#dialect) ??
+			resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT)
+		);
+	}
+
 	/** Inject/strip the intent field on tool calls; applies from the next prompt run. */
 	get intentTracing(): boolean {
 		return this.#intentTracing;
@@ -961,9 +990,7 @@ export class Agent {
 	): Promise<Context> {
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
-		const ownedDialect =
-			(this.#dialectResolver ? this.#dialectResolver(model) : this.#dialect) ??
-			resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
+		const ownedDialect = this.#ownedDialect(model);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
 		const tools = ownedDialect
 			? []
@@ -972,12 +999,11 @@ export class Agent {
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
+		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
+		// transform too, so a request-size clamp in it measures them.
+		context = this.#sentToolDefinitions.withInactiveTools(context);
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
-		// Side requests reuse the main loop's sent definitions without recording their own.
-		if (context.tools?.length) {
-			const inactiveTools = this.#sentToolDefinitions.inactiveFor(context.messages, context.tools);
-			if (inactiveTools) context = { ...context, inactiveTools };
-		}
+		context = this.#sentToolDefinitions.withInactiveTools(context);
 		return context;
 	}
 
@@ -1245,7 +1271,9 @@ export class Agent {
 	 * aborts foreground tools; an interruptible `wait` may end early through the
 	 * peek hooks. See `AgentLoopConfig.getAsideMessages`.
 	 */
-	setAsideMessageProvider(fn: (() => AsideMessage[] | Promise<AsideMessage[]>) | undefined): void {
+	setAsideMessageProvider(
+		fn: ((boundary: AsideBoundary) => AsideMessage[] | Promise<AsideMessage[]>) | undefined,
+	): void {
 		this.#asideMessageProvider = fn;
 	}
 
@@ -1687,7 +1715,7 @@ export class Agent {
 			promptOptions = imagesOrOptions as AgentPromptOptions | undefined;
 		}
 
-		await this.#runLoop(msgs, promptOptions);
+		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
 	}
 
 	/**
@@ -1711,7 +1739,12 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	async continue(signal?: AbortSignal) {
+	continue(signal?: AbortSignal): Promise<void> {
+		// Queued-message hooks run before the loop and are this agent's work too.
+		return this.#inLogContext(() => this.#continue(signal));
+	}
+
+	async #continue(signal?: AbortSignal) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1793,6 +1826,11 @@ export class Agent {
 		}
 	}
 
+	/** Run `fn` with {@link logContext} on every record it logs. */
+	#inLogContext<T>(fn: () => T): T {
+		return this.logContext ? logger.withContext(this.logContext, fn) : fn();
+	}
+
 	/**
 	 * Run the agent loop.
 	 * If messages are provided, starts a new conversation turn with those messages.
@@ -1808,7 +1846,6 @@ export class Agent {
 		if (!model) throw new Error("No model configured");
 
 		let skipInitialSteeringPoll = options?.skipInitialSteeringPoll === true;
-		using _ = new EventLoopKeepalive();
 		if (!runStateClaimed) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#runningPrompt = promise;
@@ -1824,6 +1861,7 @@ export class Agent {
 		this.#state.isStreaming = true;
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
+		this.#isPaused = false;
 
 		// Clear Cursor tool result buffer at start of each run
 		this.#cursorToolResultBuffer = [];
@@ -1997,6 +2035,9 @@ export class Agent {
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
+			onPauseChange: paused => {
+				this.#isPaused = paused;
+			},
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,
 			onToolChoiceRejected: () => {
@@ -2026,7 +2067,7 @@ export class Agent {
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
-			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
+			getAsideMessages: async boundary => (await this.#asideMessageProvider?.(boundary)) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,
@@ -2247,6 +2288,7 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {

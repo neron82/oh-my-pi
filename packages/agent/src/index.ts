@@ -34,5 +34,3 @@ export * from "./tokenizer";
 export * from "./tool-arguments";
 // Types
 export * from "./types";
-// Yield utilities for Bun event-loop busy-wait prevention
-export * from "./utils/yield";
