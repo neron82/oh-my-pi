@@ -534,6 +534,10 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 		i: options.intentTracing,
 		pd: options.pruneToolDescriptions,
 	});
+	return hashPayload(payload);
+}
+
+function hashPayload(payload: string): string {
 	let hash = 0;
 	for (let i = 0; i < payload.length; i++) {
 		hash = ((hash << 5) - hash + payload.charCodeAt(i)) | 0;
