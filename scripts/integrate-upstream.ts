@@ -129,6 +129,7 @@ interface Flags {
 	backup: boolean;
 	noMerge: boolean;
 	noCheck: boolean;
+	noRsTests: boolean;
 	noBuild: boolean;
 	noDeploy: boolean;
 	noSmoke: boolean;
@@ -161,6 +162,7 @@ function parseFlags(argv: readonly string[]): Flags {
 		backup: false,
 		noMerge: false,
 		noCheck: false,
+		noRsTests: false,
 		noBuild: false,
 		noDeploy: false,
 		noSmoke: false,
@@ -224,6 +226,9 @@ function parseFlags(argv: readonly string[]): Flags {
 				break;
 			case "--no-check":
 				flags.noCheck = true;
+				break;
+			case "--no-rs-tests":
+				flags.noRsTests = true;
 				break;
 			case "--no-build":
 				flags.noBuild = true;
@@ -843,7 +848,13 @@ async function requireCleanPublication(repoRoot: string, verbose: boolean): Prom
 	}
 }
 
-async function runChecks(repoRoot: string, base: string, manifest: ForkPathsManifest, verbose: boolean): Promise<void> {
+async function runChecks(
+	repoRoot: string,
+	base: string,
+	manifest: ForkPathsManifest,
+	verbose: boolean,
+	noRsTests: boolean,
+): Promise<void> {
 	const changed = (await gitChecked(repoRoot, ["diff", "--name-only", base, "HEAD"], { verbose }))
 		.split("\n")
 		.filter(line => line.trim().length > 0);
@@ -881,7 +892,16 @@ async function runChecks(repoRoot: string, base: string, manifest: ForkPathsMani
 	);
 	if (rustChanged) {
 		// run-rs-task normally looks only at uncommitted changes, but this merge is already committed.
-		await runCommandInherit(repoRoot, ["bun", "run", "test:rs"], "Rust tests (bun run test:rs)", { CI: "true" });
+		if (noRsTests) {
+			console.log(
+				"\n==> SKIPPING Rust tests (--no-rs-tests): crates/ is byte-identical to upstream, and upstream's\n" +
+					"    pi-shell testkit encodes macOS libc/libm/terminfo behaviour plus rustfmt-rewrapped escapes\n" +
+					"    that cannot pass on this host. GitHub CI runs no Rust gate either; the native addon build\n" +
+					"    below still compiles every crate.",
+			);
+		} else {
+			await runCommandInherit(repoRoot, ["bun", "run", "test:rs"], "Rust tests (bun run test:rs)", { CI: "true" });
+		}
 	}
 }
 
@@ -1426,7 +1446,7 @@ async function main(): Promise<void> {
 				parents[1] ?? (await gitChecked(repoRoot, ["rev-parse", "-q", "HEAD"], { verbose: flags.verbose })).trim();
 		}
 		try {
-			await runChecks(repoRoot, checkBase, manifest, flags.verbose);
+			await runChecks(repoRoot, checkBase, manifest, flags.verbose, flags.noRsTests);
 		} catch (error) {
 			console.error(
 				"\nVerification failed. The merge is retained locally; build, deployment and push have not run. Fix the reported errors, commit the fixes, then rerun ./update.sh --no-fetch --no-merge.",
