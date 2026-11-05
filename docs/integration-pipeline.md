@@ -47,7 +47,9 @@ The script runs the following stages, in order; each can be skipped:
    `package.json`/`bun.lock`, validates the fork workflow’s local action dependencies, runs the full type-check (`bun run check:ts`), refreshes the host native addon before tests,
    the fork's stability test suite (including task-cache affinity and prompt-admission regressions), the independent prompt-cache trajectory smoke, and `bun run test:rs` when the merge
    touched `crates/`. Rust checks run with `CI=true` so committed merge changes are tested even when the working tree is clean. This is the safety net that catches upstream API churn
-   breaking fork code that the merge kept.
+   breaking fork code that the merge kept. `./update.sh` passes `--no-rs-tests` by default because upstream's pi-shell testkit only passes on macOS
+   (libc/libm/terminfo expectations) and carries escapes mangled by upstream's own rustfmt rewrap; the addon build still compiles every crate and GitHub CI runs no
+   Rust gate. Set `OMP_RS_TESTS=1` to run the Rust suite anyway.
 5. **Build** — verifies the host native addon is fresh, then compiles the
    `omp` binary exactly like a local release build
    (`bun packages/coding-agent/scripts/build-binary.ts`, which embeds the
