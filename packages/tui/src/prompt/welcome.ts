@@ -369,6 +369,7 @@ export class WelcomeComponent implements Component {
 		// Centered without the update indicator, which then trails the version: the
 		// lockup stays put as the indicator appears, grows, and changes form.
 		const lines = centerBlock(art, termWidth);
+		if (hasLockup && this.#versionUpdate) appendVersionUpdate(lines, this.#versionUpdate, termWidth);
 		if (room >= LOGO_WIDTH) {
 			lines.push(
 				"",

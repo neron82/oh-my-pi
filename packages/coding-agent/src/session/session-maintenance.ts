@@ -1229,28 +1229,14 @@ export class SessionMaintenance {
 							(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
 						);
 					case "soft":
-						return true;
 					case "handoff":
+						return true;
 					case "shake":
 						return false;
 				}
-				if (method === "snapcompact") {
-					if (
-						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
-					) {
-						selectedMethod = method;
-						selectedMethodIndex = index;
-						break;
-					}
-					continue;
-				}
-				if (method === "handoff" || method === "soft") {
-					selectedMethod = method;
-					selectedMethodIndex = index;
-					break;
-				}
-			}
+			};
+			selectedMethodIndex = methods.findIndex((method, index) => index >= methodOffset && runsManually(method));
+			const selectedMethod = methods[selectedMethodIndex];
 			if (!selectedMethod) {
 				throw new Error("No configured compaction method can run manually.");
 			}
