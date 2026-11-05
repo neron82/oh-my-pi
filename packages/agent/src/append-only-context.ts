@@ -83,6 +83,8 @@ export interface StablePrefixSnapshot {
 export interface BuildOptions {
 	/** Inject the `i` intent field into tool schemas (must match agent-loop's normalizeTools). */
 	intentTracing: boolean;
+	/** Schema description of the injected `i` field (must match agent-loop's normalizeTools). */
+	intentDescription?: string;
 	/** Strip tool descriptions from the provider-bound specs (must match normalizeTools). */
 	pruneToolDescriptions?: boolean;
 }
@@ -137,6 +139,7 @@ export class StablePrefix {
 	// but changes any of these must miss the fast path.
 	#lastToolKey: readonly string[] | undefined;
 	#lastIntentTracing: boolean | undefined;
+	#lastIntentDescription: string | undefined;
 	#lastPruneToolDescriptions: boolean | undefined;
 
 	build(context: AgentContext, options: BuildOptions): boolean {
@@ -167,6 +170,7 @@ export class StablePrefix {
 	#fastPathHit(context: AgentContext, options: BuildOptions, toolKeys: readonly string[]): boolean {
 		if (
 			this.#lastIntentTracing !== options.intentTracing ||
+			this.#lastIntentDescription !== options.intentDescription ||
 			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions
 		) {
 			return false;
@@ -197,6 +201,7 @@ export class StablePrefix {
 	#recordFastPathKey(context: AgentContext, options: BuildOptions, renderedToolKeys: readonly string[]): void {
 		this.#lastPromptSegments = [...context.systemPrompt];
 		this.#lastIntentTracing = options.intentTracing;
+		this.#lastIntentDescription = options.intentDescription;
 		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
 		this.#lastToolKey = renderedToolKeys;
 	}
@@ -473,16 +478,44 @@ export class AppendOnlyContextManager {
 
 function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefixSnapshot {
 	const systemPrompt = [...context.systemPrompt];
-	const tools =
-		normalizeTools(context.tools, {
-			injectIntent: options.intentTracing,
-			pruneDescriptions: options.pruneToolDescriptions,
-		}) ?? [];
+	const tools = normalizeWireTools(context.tools, options);
 	return {
 		systemPrompt,
 		tools,
 		fingerprint: computeFingerprint(systemPrompt, tools, options),
 	};
+}
+
+function normalizeWireTools(tools: AgentContext["tools"], options: BuildOptions): Tool[] {
+	return (
+		normalizeTools(tools, {
+			injectIntent: options.intentTracing,
+			intentDescription: options.intentDescription,
+			pruneDescriptions: options.pruneToolDescriptions,
+		}) ?? []
+	);
+}
+
+/** The fields of a provider-bound tool spec the wire carries; `normalizeTools` has rendered `examples` into the description. */
+function wireToolFields(t: Tool) {
+	return {
+		n: t.name,
+		d: t.description,
+		p: t.parameters,
+		s: t.strict,
+		cf: t.customFormat,
+		cw: t.customWireName,
+	};
+}
+
+/**
+ * Fingerprint of the tool specs a request built with `options` sends: the
+ * tools half of the prefix fingerprint, for a caller that compares tool sets
+ * across requests. A same-name tool whose description, schema, examples,
+ * `strict`, `customFormat` or `customWireName` changed makes another one.
+ */
+export function wireToolsFingerprint(tools: AgentContext["tools"], options: BuildOptions): string {
+	return hashPayload(JSON.stringify(normalizeWireTools(tools, options).map(wireToolFields)));
 }
 
 function computeFingerprint(systemPrompt: string[], tools: Tool[], options: BuildOptions): string {
