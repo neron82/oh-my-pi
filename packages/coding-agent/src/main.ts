@@ -727,7 +727,7 @@ async function runInteractiveMode(
 		// Also runs the fork-safe background model discovery it wraps, after the
 		// first frame; the deferred-run recovery below must stay after the TUI is
 		// subscribed so resumed-turn events reach the host.
-		startDeferredStartupWork?.();
+		startDeferredStartupWork?.(mode);
 		// Recover deferred runs after the TUI is subscribed so resumed-turn events reach the host.
 		await session.resumeDeferredRuns();
 

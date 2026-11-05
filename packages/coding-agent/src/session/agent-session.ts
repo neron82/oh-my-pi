@@ -488,7 +488,7 @@ import {
 import { collectSubSessions, type SubSession } from "./sub-sessions";
 import { DeferredRunManager } from "./deferred-run-manager";
 import { isImageInputRejection, withoutImageInput } from "./image-input-rejection";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,

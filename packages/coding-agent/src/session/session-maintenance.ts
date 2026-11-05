@@ -478,6 +478,30 @@ export interface SessionMaintenanceHost {
 	abortHandoff(): void;
 }
 
+/** How a model reads a snapcompact archive: whether it may read reasoning and whether it takes images. */
+interface ArchiveReader {
+	/** Its classifier refuses quoted reasoning ({@link snapcompact.readerIncludesThinking}). */
+	excludeThinking: boolean;
+	/** It takes no image input, so frames would reach it as placeholders. */
+	withoutFrames: boolean;
+	/** Both flags as one value, for caches and scan bookkeeping. */
+	key: `${boolean}:${boolean}`;
+}
+
+function archiveReader(model: Model): ArchiveReader {
+	const excludeThinking = !snapcompact.readerIncludesThinking(model);
+	const withoutFrames = !sendsImageInputOnWire(model);
+	return { excludeThinking, withoutFrames, key: `${excludeThinking}:${withoutFrames}` };
+}
+
+/**
+ * Whether `message` may stand for a snapcompact archive: a snapcompact summary, or one whose
+ * compaction recorded no method (legacy and extension-provided entries), which may still carry one.
+ */
+function mayHoldArchive(message: CompactionSummaryMessage): boolean {
+	return message.method === undefined || message.method === "snapcompact";
+}
+
 /**
  * KV-aligned summarization base tied to the model it was built for. The
  * base may only be used by a compaction candidate that is the SAME model:
