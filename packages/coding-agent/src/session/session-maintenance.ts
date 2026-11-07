@@ -1684,9 +1684,7 @@ export class SessionMaintenance {
 		) {
 			throw new CompactionCancelledError(undefined, { cause: signalController.signal.reason });
 		}
-		const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, signalController.signal, {
-			collectMemoryContext: false,
-		});
+		const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, signalController.signal);
 		if (
 			signalController.signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
@@ -1843,9 +1841,7 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 
-			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal, {
-				collectMemoryContext: false,
-			});
+			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal);
 			if (
 				controller.signal.aborted ||
 				!this.#usesExperimentalContextManagement() ||
@@ -1963,9 +1959,8 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Ask the active memory backend for an extra-context block to splice into
-	 * the compaction summary prompt. Both the manual and auto compaction paths
-	 * funnel through this helper so the behaviour stays identical.
+	 * Ask the active memory backend for context when a compaction summary
+	 * consumes it. Native OpenAI compaction uses the live prompt instead.
 	 *
 	 * Failures are swallowed: a memory backend going sideways MUST NOT block
 	 * compaction (which is itself the recovery path for context overflow).
@@ -2402,6 +2397,7 @@ export class SessionMaintenance {
 				{
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
+					loadExtraContext: compactionPrep.loadMemoryContext,
 					remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
@@ -3641,20 +3637,8 @@ export class SessionMaintenance {
 	async #prepareCompactionFromHooks(
 		preparation: CompactionPreparation,
 		hookCompaction: CompactionResult | undefined,
-		/** Aborts the backend recall when this compaction pass is cancelled or superseded. */
+		/** Aborts backend recall when compaction is cancelled or superseded. */
 		signal: AbortSignal,
-		options?: {
-			/**
-			 * Collect built-in remote memory-backend recall context for the LLM
-			 * summary. Notes-backed rollover consumes only preservation data, so
-			 * it passes `false`: no remote `recallForCompaction()` round-trip
-			 * whose recalled context would be discarded. Extension
-			 * `session.compacting` handlers still run for their preservation
-			 * data; this does not promise arbitrary extension hooks are
-			 * network-free.
-			 */
-			collectMemoryContext?: boolean;
-		},
 	): Promise<
 		| {
 				kind: "fromHook";
@@ -3669,6 +3653,7 @@ export class SessionMaintenance {
 		| {
 				kind: "needsLlm";
 				hookContext: string[] | undefined;
+				loadMemoryContext: () => Promise<string[] | undefined>;
 				hookPrompt: string | undefined;
 				preserveData: Record<string, unknown> | undefined;
 		  }
@@ -3690,13 +3675,6 @@ export class SessionMaintenance {
 			preserveData = result?.preserveData;
 		}
 
-		if (options?.collectMemoryContext !== false) {
-			const memoryBackendContext = await this.#collectMemoryBackendContext(preparation, signal);
-			if (memoryBackendContext) {
-				hookContext = hookContext ? [...hookContext, memoryBackendContext] : [memoryBackendContext];
-			}
-		}
-
 		if (hookCompaction) {
 			preserveData ??= hookCompaction.preserveData;
 			return {
@@ -3711,7 +3689,17 @@ export class SessionMaintenance {
 			};
 		}
 
-		return { kind: "needsLlm", hookContext, hookPrompt, preserveData };
+		let memoryContext: Promise<string[] | undefined> | undefined;
+		return {
+			kind: "needsLlm",
+			hookContext,
+			hookPrompt,
+			preserveData,
+			loadMemoryContext: () =>
+				(memoryContext ??= this.#collectMemoryBackendContext(preparation, signal).then(context =>
+					context ? [context] : undefined,
+				)),
+		};
 	}
 
 	/**
