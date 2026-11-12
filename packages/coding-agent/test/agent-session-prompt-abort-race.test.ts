@@ -41,7 +41,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		responses: Array<() => MockResponse | Promise<MockResponse>>,
 		textOnly = false,
 		options: {
-			modelRegistry?: Pick<ModelRegistry, "getApiKey">;
+			modelRegistry?: Pick<ModelRegistry, "getApiKey" | "find">;
 			clientBridge?: unknown;
 			extensionRunner?: unknown;
 		} = {},
@@ -545,6 +545,7 @@ describe("AgentSession prompt admission racing abort", () => {
 				await apiKeyGate.promise;
 				return undefined;
 			},
+			find: () => undefined,
 		};
 		const { session } = await createSession(
 			[
@@ -599,6 +600,7 @@ describe("AgentSession prompt admission racing abort", () => {
 				await apiKeyGate.promise;
 				return undefined;
 			},
+			find: () => undefined,
 		};
 		const { session } = await createSession(
 			[
