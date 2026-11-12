@@ -12,6 +12,8 @@ import {
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
+import { FileChangeType, type FileEvent } from "../src/lsp/types";
+import { fileToUri } from "../src/lsp/utils";
 
 interface RpcMessage {
 	jsonrpc: "2.0";
@@ -31,6 +33,7 @@ interface FakeState {
 	didClose: string[];
 	notifications: string[];
 	workspaceFolders: string[];
+	watchedFileChanges: FileEvent[];
 }
 
 class MuxTestClient {
