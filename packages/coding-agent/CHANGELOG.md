@@ -105,6 +105,8 @@
 - A browser call from Eval that sets no timeout of its own, such as `tab.evaluate(…)` or `tab.run(fn)`, now runs as long as the Eval cell's `timeout` instead of failing at 30 seconds, and a call that runs out of time says what happened to the tab and how to give it longer ([#18737](https://github.com/can1357/oh-my-pi/pull/18737) by [@will-bogusz](https://github.com/will-bogusz))
 - Cancelling a browser call now releases an unresponsive worker after its cancellation grace instead of waiting for the full call budget, and recovery after a timeout has its own bounded startup budget ([#18737](https://github.com/can1357/oh-my-pi/pull/18737) by [@will-bogusz](https://github.com/will-bogusz))
 - Cmux browser helpers now use the active browser call's remaining time instead of cutting long evaluations off at the socket's 30-second default or giving late helpers a fresh full timeout; cancelling discards queued helpers and interrupts active socket requests so later calls can proceed ([#18737](https://github.com/can1357/oh-my-pi/pull/18737) by [@will-bogusz](https://github.com/will-bogusz))
+- Preserved provider prompt-cache reuse across auto-learn captures, skill updates, and other session changes that do not require rebuilding the full system prompt.
+- Preserved provider prompt-cache hits when resuming sessions after pruning, rewinding, branching, tree navigation, or other history changes.
 
 ## [18.19.0] - 2026-11-12
 
@@ -430,7 +432,6 @@
 - Improved image-generation errors to report why each model in a failed fallback chain was unsuccessful.
 - Fixed model switching after remote compaction so the destination provider can recover the necessary conversation history instead of receiving only a placeholder summary.
 - Remote MCP HTTP and SSE connections now honor `NODE_EXTRA_CA_CERTS` from the agent environment, including certificates loaded after startup.
-- Preserved provider prompt-cache reuse across auto-learn captures, skill updates, and other session changes that do not require rebuilding the full system prompt.
 - Closing `/btw` history during tool approval now correctly returns focus to the approval prompt.
 - URL reads now handle bot-protection challenges more reliably, try alternate user agents, and report blocked or failed results instead of returning a protection page as content.
 - Timed-out or cancelled JSON reads now stop their `jq` processing promptly.
@@ -439,7 +440,6 @@
 - Generic remote compaction now supports `before_provider_request` payload hooks.
 - Background completions no longer start hidden turns after an ACP prompt ends or incorrectly leave the session busy.
 - Fixed shell behavior for exit status and `EXIT` traps in subshells to match Bash semantics.
-- Preserved provider prompt-cache hits when resuming sessions after pruning, rewinding, branching, tree navigation, or other history changes.
 - Cursor native edit operations now display accurate edit cards and diffs, including failed edits, instead of misleading separate read/write cards.
 - `grep` and `glob` now respect timeout and cancellation when ovnfs status or daemon handshakes stall.
 - Fixed `--mode json` shutdowns so tool completion events and the final JSON record are not lost or truncated.

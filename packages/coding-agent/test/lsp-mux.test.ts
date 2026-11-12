@@ -303,7 +303,7 @@ describe("LspMuxServer", () => {
 		const first = await link();
 		await initialize(first.client);
 		const added = { uri: "file:///other-checkout", name: "other-checkout" };
-		first.client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+		first.client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [added] } });
 		expect((await state(first.client)).workspaceFolders).toEqual([added.uri]);
 		const firstClosed = first.client.waitForClose();
 		first.client.destroy();
@@ -313,6 +313,85 @@ describe("LspMuxServer", () => {
 		expect(second.connected.spawned).toBe(false);
 		await initialize(second.client);
 		expect((await state(second.client)).workspaceFolders).toEqual([]);
+	}, 10_000);
+
+	async function registerTsWatcher(client: MuxTestClient): Promise<void> {
+		await client.request("test/serverRequest", {
+			method: "client/registerCapability",
+			params: {
+				registrations: [
+					{
+						id: "ts-files",
+						method: "workspace/didChangeWatchedFiles",
+						registerOptions: { watchers: [{ globPattern: { baseUri: fileToUri(tmpDir), pattern: "**/*.ts" } }] },
+					},
+				],
+			},
+		});
+	}
+
+	/** Link a client that hands watching to the mux, register `**\/*.ts`, and return once the watch reports a write. */
+	async function watchingClient(): Promise<MuxTestClient> {
+		const { client } = await link();
+		await client.request("initialize", {
+			...initializeParams(),
+			capabilities: { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } },
+		});
+		client.notify("initialized", {});
+		await registerTsWatcher(client);
+
+		// The watch opens shortly after the registration; write new files until one is reported.
+		const written = new Set<string>();
+		const deadline = Date.now() + 5_000;
+		for (let attempt = 0; ; attempt++) {
+			const created = path.join(tmpDir, `created-${attempt}.ts`);
+			await Bun.write(created, "export {};\n");
+			written.add(fileToUri(created));
+			await Bun.sleep(200);
+			const { watchedFileChanges } = await state(client);
+			if (watchedFileChanges.some(change => change.type === FileChangeType.Created && written.has(change.uri)))
+				return client;
+			if (Date.now() > deadline) throw new Error(`no Created among ${JSON.stringify(watchedFileChanges)}`);
+		}
+	}
+
+	it("watches the files a shared server registers when the client asked it to hand watching over", async () => {
+		await watchingClient();
+	}, 10_000);
+
+	it("forwards a client's own watched-file report once, without the watcher's echo", async () => {
+		const client = await watchingClient();
+		const own = path.join(tmpDir, "own.ts");
+		await Bun.write(own, "export {};\n");
+		client.notify("workspace/didChangeWatchedFiles", {
+			changes: [{ uri: fileToUri(own), type: FileChangeType.Created }],
+		});
+		// A later outside write proves the watcher has flushed past the client's own write.
+		const marker = path.join(tmpDir, "marker.ts");
+		await Bun.write(marker, "export {};\n");
+		const deadline = Date.now() + 5_000;
+		let changes: FileEvent[] = [];
+		while (!changes.some(change => change.uri === fileToUri(marker))) {
+			if (Date.now() > deadline) throw new Error(`marker never reported: ${JSON.stringify(changes)}`);
+			await Bun.sleep(100);
+			changes = (await state(client)).watchedFileChanges;
+		}
+		// Past the batch window: an echo would have landed by now.
+		await Bun.sleep(600);
+		changes = (await state(client)).watchedFileChanges;
+		expect(changes.filter(change => change.uri === fileToUri(own))).toEqual([
+			{ uri: fileToUri(own), type: FileChangeType.Created },
+		]);
+	}, 15_000);
+
+	it("leaves watching to a shared server whose client did not ask it to hand watching over", async () => {
+		const { client } = await link();
+		await initialize(client);
+		await registerTsWatcher(client);
+
+		await Bun.write(path.join(tmpDir, "created.ts"), "export {};\n");
+		await Bun.sleep(600);
+		expect((await state(client)).watchedFileChanges).toEqual([]);
 	}, 10_000);
 
 	const overflowFixturePath = path.join(import.meta.dir, "fixtures", "fake-lsp-server-overflow.ts");
