@@ -351,15 +351,7 @@ describe("bench OAuth account selection", () => {
 					writeStdout: () => {},
 					writeStderr: () => {},
 					setExitCode: () => {},
-					streamSimple: (_model, _context, options) => {
-						const stream = fakeStream();
-						const iterator = (async function* () {
-							if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
-							keys.push(await options.apiKey({ error: undefined, lastChance: false }));
-							yield* stream;
-						})();
-						return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
-					},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
 				},
 			);
 			expect(summary.failures).toBe(0);
@@ -707,7 +699,7 @@ describe("bench service tier", () => {
 							stream.fail(error);
 						}
 					})();
-					return Object.assign(iterator, { result: stream.result }) as unknown as AssistantMessageEventStream;
+					return stream;
 				},
 			},
 		);
