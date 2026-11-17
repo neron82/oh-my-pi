@@ -894,23 +894,26 @@ export class TurnRecovery {
 					return {
 						switchedCredential: outcome.switched,
 						retryAfterMs,
-						// Provider-stated timing only when the error text parsed;
-						// the 30-minute fallback is a guess.
-						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: activeModel.baseUrl,
-						modelId: activeModel.id,
-					},
-				);
-				return {
-					switchedCredential: outcome.switched,
-					retryAfterMs,
-					retryAtMs: outcome.retryAtMs,
-					blockedUntilMs: outcome.blockedUntilMs,
-					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
-					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
-					reportResetAtMs: outcome.reportResetAtMs,
-					statedResetAtMs: outcome.statedResetAtMs,
-				};
+						retryAtMs: outcome.retryAtMs,
+						blockedUntilMs: outcome.blockedUntilMs,
+						priorBlockedUntilMs: outcome.priorBlockedUntilMs,
+						priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
+						reportResetAtMs: outcome.reportResetAtMs,
+						statedResetAtMs: outcome.statedResetAtMs,
+					};
+				} catch (error) {
+					if (!bookkeepingTimeout.aborted) throw error;
+					return {
+						switchedCredential: false,
+						retryAfterMs,
+						retryAtMs: undefined,
+						blockedUntilMs: undefined,
+						priorBlockedUntilMs: undefined,
+						priorBlockedUntilTimed: undefined,
+						reportResetAtMs: undefined,
+						statedResetAtMs: undefined,
+					};
+				}
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
 		}

@@ -42,7 +42,7 @@ import {
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
 import { PromptStabilityMonitor } from "./prompt-stability";
-import { isProviderRefusalMessage } from "./replay-policy";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
 import { Tokenizer } from "./tokenizer";
 import {
