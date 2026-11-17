@@ -58,6 +58,7 @@ function createHost(model: Model, modelRegistry: ModelRegistry, capture: Capture
 	return {
 		agent: { state: { messages: [] } } as never,
 		sessionManager: {
+			getSessionId: () => "test-session",
 			getSessionGeneration: () => 3,
 			getSessionFile: () => "/tmp/deferred-gating.jsonl",
 			appendDeferredResume: (entry: DeferredResumeEntry) => {
