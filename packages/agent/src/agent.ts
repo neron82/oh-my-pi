@@ -77,10 +77,12 @@ import { isSoftToolRequirement } from "./types";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
-	});
+	return filterProviderReplayMessages(
+		messages.filter(
+			(m): m is Message =>
+				m.role === "assistant" || m.role === "user" || m.role === "developer" || m.role === "toolResult",
+		),
+	);
 }
 
 function refreshToolChoiceForActiveTools(
