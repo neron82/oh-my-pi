@@ -815,6 +815,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
 	#recording = false;
+	#awaitingAnswer = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -1278,6 +1279,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Whether the turn waits on an ask the user hasn't answered: the brand's spinner turns into a question mark. */
+	setAwaitingAnswer(awaiting: boolean): void {
+		if (this.#awaitingAnswer === awaiting) return;
+		this.#awaitingAnswer = awaiting;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2762,6 +2770,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
+			awaitingAnswer: this.#awaitingAnswer,
 			now: new Date(nowMs),
 			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled, brandVisible),
 			git: {

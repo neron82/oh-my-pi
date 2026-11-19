@@ -163,10 +163,10 @@ describe("MCP tool rendering", () => {
 
 		expect(rendered).toContain("event 97");
 		expect(rendered).toContain("event 100");
-		expect(rendered).toContain("artifact://7");
+		expect(rendered).toContain("local://7.log");
 		// The link appears exactly once — as the styled warning — proving the
 		// inline notice was stripped from the body rather than echoed verbatim.
-		expect(rendered.split("artifact://7").length - 1).toBe(1);
+		expect(rendered.split("local://7.log").length - 1).toBe(1);
 	}, 15_000);
 	it("strips terminal escape injection from untrusted Markdown-rendered MCP text", () => {
 		// Regression: raw OSC 52 (clipboard write) payloads from a malicious
