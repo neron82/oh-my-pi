@@ -1394,6 +1394,7 @@ export class SessionMaintenance {
 							(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
 						);
 					case "soft":
+						return true;
 					case "handoff":
 						return compactMode?.name === "handoff";
 					case "shake":
