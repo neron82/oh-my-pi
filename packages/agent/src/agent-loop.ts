@@ -2168,9 +2168,9 @@ async function prepareProviderCall(
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
-			intentTracing: !!config.intentTracing,
-			intentDescription: config.intentDescription,
-			pruneToolDescriptions,
+			intentTracing: toolOptions.injectIntent,
+			intentDescription: toolOptions.intentDescription,
+			pruneToolDescriptions: toolOptions.pruneDescriptions,
 		});
 	} else {
 		llmContext = buildBaseProviderContext(
