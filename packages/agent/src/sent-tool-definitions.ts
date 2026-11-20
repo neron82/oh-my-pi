@@ -32,13 +32,15 @@ export class SentToolDefinitions {
 	 * request declared tools, `standby` (minus active names) stands in, so the first declaration
 	 * already holds tools that may activate later.
 	 */
-	withInactiveTools(context: Context): Context {
-		const inactiveTools = context.tools?.length ? this.inactiveFor(context.messages, context.tools) : undefined;
+	withInactiveTools(context: Context, standby?: readonly Tool[]): Context {
+		const inactiveTools = context.tools?.length
+			? this.inactiveFor(context.messages, context.tools, standby)
+			: undefined;
 		if (!inactiveTools && !context.inactiveTools) return context;
 		return { ...context, inactiveTools };
 	}
 
-	inactiveFor(messages: readonly Message[], active: readonly Tool[]): Tool[] | undefined {
+	inactiveFor(messages: readonly Message[], active: readonly Tool[], standby?: readonly Tool[]): Tool[] | undefined {
 		let declared: readonly string[] | undefined;
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];

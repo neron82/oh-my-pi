@@ -980,6 +980,8 @@ export class Agent {
 				transformProviderContext: this.#transformProviderContext,
 				sentToolDefinitions: this.#sentToolDefinitions,
 				intentTracing: this.#intentTracing,
+				intentDescription: this.#intentDescription,
+				standbyTools: this.#standbyTools,
 				pruneToolDescriptions: this.#pruneToolDescriptions,
 				dialect: this.#dialect,
 				getDialect: this.#dialectResolver,

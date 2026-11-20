@@ -2039,6 +2039,8 @@ export interface ProviderContextBuild {
 	/** Remembers final tool declarations for Anthropic inactive-tool re-declaration. */
 	sentToolDefinitions?: AgentLoopConfig["sentToolDefinitions"];
 	intentTracing?: boolean;
+	intentDescription?: string;
+	standbyTools?: AgentContext["standbyTools"];
 	pruneToolDescriptions?: boolean;
 	dialect?: Dialect;
 	getDialect?: AgentLoopConfig["getDialect"];
@@ -2057,7 +2059,7 @@ function resolveProviderDialect(
  * messages + normalized tools. Shared by the live loop and the replay so the
  * two can never drift in tool encoding. */
 function buildBaseProviderContext(
-	options: { intentTracing?: boolean; pruneToolDescriptions?: boolean },
+	options: NormalizeToolsOptions,
 	systemPrompt: string[],
 	tools: AgentContext["tools"],
 	messages: Context["messages"],
@@ -2065,10 +2067,7 @@ function buildBaseProviderContext(
 	return {
 		systemPrompt,
 		messages,
-		tools: normalizeTools(tools, {
-			injectIntent: !!options.intentTracing,
-			pruneDescriptions: options.pruneToolDescriptions,
-		}),
+		tools: normalizeTools(tools, options),
 	};
 }
 
@@ -2080,11 +2079,13 @@ async function finalizeProviderContext(
 	model: Model,
 	build: Pick<ProviderContextBuild, "sentToolDefinitions" | "transformProviderContext">,
 	ownedDialect: Dialect | undefined,
+	standby?: Context["tools"],
 ): Promise<{ context: Context; promptToolWireTools: Context["tools"] }> {
 	let context = llmContext;
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
-	// re-declares; recomputed below against what the transform returns.
-	if (build.sentToolDefinitions) context = build.sentToolDefinitions.withInactiveTools(context);
+	// re-declares; recomputed below against what the transform returns. Standby tools are normalized like
+	// `tools`, so a standby tool's definition matches the one it is sent with once active.
+	if (build.sentToolDefinitions) context = build.sentToolDefinitions.withInactiveTools(context, standby);
 	if (build.transformProviderContext) {
 		context = await build.transformProviderContext(context, model);
 	}
@@ -2101,10 +2102,12 @@ async function finalizeProviderContext(
 	// After transformProviderContext and dialect encoding, so these are exactly
 	// the active native definitions the provider is about to receive. Replay
 	// uses the same path, making its inactive-tool decoration byte-aligned too.
-	if (build.sentToolDefinitions && context.tools) {
-		build.sentToolDefinitions.record(context.tools);
-		const inactiveTools = build.sentToolDefinitions.inactiveFor(context.messages, context.tools);
-		if (inactiveTools) context = { ...context, inactiveTools };
+	if (build.sentToolDefinitions) {
+		if (context.tools) build.sentToolDefinitions.record(context.tools);
+		if (context.inactiveTools) build.sentToolDefinitions.record(context.inactiveTools);
+		// The transformed standby definitions, when no request has declared tools yet. Replay runs this
+		// same step, making its inactive-tool decoration byte-aligned with the live request.
+		context = build.sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 	}
 	return { context, promptToolWireTools };
 }
@@ -2139,14 +2142,14 @@ export async function buildProviderContext(
 	const llmMessages = await build.convertToLlm(transformed);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect = resolveProviderDialect(build, model);
-	const pruneToolDescriptions = !!build.pruneToolDescriptions && !ownedDialect;
-	const base = buildBaseProviderContext(
-		{ intentTracing: build.intentTracing, pruneToolDescriptions },
-		systemPrompt,
-		tools,
-		normalizedMessages,
-	);
-	return (await finalizeProviderContext(base, model, build, ownedDialect)).context;
+	const toolOptions: NormalizeToolsOptions = {
+		injectIntent: !!build.intentTracing,
+		intentDescription: build.intentDescription,
+		pruneDescriptions: !!build.pruneToolDescriptions && !ownedDialect,
+	};
+	const base = buildBaseProviderContext(toolOptions, systemPrompt, tools, normalizedMessages);
+	const standbyTools = build.sentToolDefinitions ? normalizeTools(build.standbyTools, toolOptions) : undefined;
+	return (await finalizeProviderContext(base, model, build, ownedDialect, standbyTools)).context;
 }
 
 async function prepareProviderCall(
@@ -2163,7 +2166,11 @@ async function prepareProviderCall(
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect = resolveProviderDialect(config, model);
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	const toolOptions: NormalizeToolsOptions = {
+		injectIntent: !!config.intentTracing,
+		intentDescription: config.intentDescription,
+		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
+	};
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
@@ -2173,14 +2180,10 @@ async function prepareProviderCall(
 			pruneToolDescriptions: toolOptions.pruneDescriptions,
 		});
 	} else {
-		llmContext = buildBaseProviderContext(
-			{ intentTracing: config.intentTracing, pruneToolDescriptions },
-			context.systemPrompt,
-			context.tools,
-			normalizedMessages,
-		);
+		llmContext = buildBaseProviderContext(toolOptions, context.systemPrompt, context.tools, normalizedMessages);
 	}
-	const finalized = await finalizeProviderContext(llmContext, model, config, ownedDialect);
+	const standbyTools = config.sentToolDefinitions ? normalizeTools(context.standbyTools, toolOptions) : undefined;
+	const finalized = await finalizeProviderContext(llmContext, model, config, ownedDialect, standbyTools);
 	return { model, context: finalized.context, promptToolWireTools: finalized.promptToolWireTools, ownedDialect };
 }
 
